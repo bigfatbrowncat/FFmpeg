@@ -367,6 +367,8 @@ OBJS-$(CONFIG_PIXSCOPE_FILTER)               += vf_datascope.o
 OBJS-$(CONFIG_PP_FILTER)                     += vf_pp.o qp_table.o
 OBJS-$(CONFIG_PP7_FILTER)                    += vf_pp7.o qp_table.o
 OBJS-$(CONFIG_PREMULTIPLY_FILTER)            += vf_premultiply.o framesync.o
+OBJS-$(CONFIG_PYTHON_FILTER)                 += vf_python.o
+
 OBJS-$(CONFIG_PREWITT_FILTER)                += vf_convolution.o
 OBJS-$(CONFIG_PREWITT_OPENCL_FILTER)         += vf_convolution_opencl.o opencl.o \
                                                 opencl/convolution.o

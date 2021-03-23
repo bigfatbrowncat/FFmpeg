@@ -528,6 +528,9 @@ extern  AVFilter ff_vsink_buffer;
 extern AVFilter ff_af_afifo;
 extern AVFilter ff_vf_fifo;
 
+extern AVFilter ff_vf_python;
+
+
 #include "libavfilter/filter_list.c"
 
 
