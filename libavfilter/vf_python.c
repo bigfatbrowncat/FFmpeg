@@ -37,6 +37,8 @@
 
 #include "libavutil/pixdesc.h"
 #include "libavutil/intreadwrite.h"
+#include "libavutil/opt.h"
+
 #include "avfilter.h"
 #include "formats.h"
 #include "internal.h"
@@ -456,13 +458,13 @@ static int pycall(const char* dllfile, const char* pyfile, const char* func) {
 
 
 
-
-
-
-
-
-
 typedef struct PythonContext {
+    const AVClass *class;
+
+    char* python_library;
+	char* script_filename;
+	char* class_name;
+	char* constructor_argument;
     /* masks used for two pixels interpolation */
 //    uint32_t hi_pixel_mask;
 //    uint32_t lo_pixel_mask;
@@ -474,6 +476,30 @@ typedef struct PythonContext {
 //    int bpp; ///< bytes per pixel, pixel stride for each (packed) pixel
 //    int is_be;
 } PythonContext;
+
+
+#define OFFSET(x) offsetof(PythonContext, x)
+#define A AV_OPT_FLAG_VIDEO_PARAM|AV_OPT_FLAG_FILTERING_PARAM
+
+static const AVOption python_options[] = {
+    { "pylib",   "Python runtime library (libpython3.X.so on Linux, python3.X.dll on Windows)",
+    		OFFSET(python_library), AV_OPT_TYPE_STRING, {.str=""}, 0, 0, A
+    },
+    { "script",   "Python 3 script to call",
+    		OFFSET(script_filename), AV_OPT_TYPE_STRING, {.str=""}, 0, 0, A
+    },
+    { "class",   "Python 3 class that implements the filter",
+    		OFFSET(class_name), AV_OPT_TYPE_STRING, {.str=""}, 0, 0, A
+    },
+    { "init_arg",   "Constructor argument to pass to the __init__ of the class",
+    		OFFSET(constructor_argument), AV_OPT_TYPE_STRING, {.str=""}, 0, 0, A
+    },
+    { NULL }
+};
+
+AVFILTER_DEFINE_CLASS(python);
+
+
 
 typedef struct ThreadData {
     AVFrame *in, *out;
@@ -497,8 +523,9 @@ static int pythonCallProcess(AVFilterContext *ctx, void *arg, int jobnr, int nb_
 
     // Currently only one thread is supported here, so jobnr has to be 0 and nb_jobs should be 1
 
-    fprintf(stderr, "THREAD!!!\n");
-    pycall("d:\\Anaconda3\\envs\\tensorflow-cl\\python36.dll", "D:\\Projects\\ffmpeg-python-interop\\pyff\\foo.py", "foo");
+    fprintf(stderr, "THREAD!!! %s\n", s->python_library); fflush(stderr);
+    pycall(s->python_library, s->script_filename, s->class_name);
+    //pycall("d:\\Anaconda3\\envs\\tensorflow-cl\\python36.dll", "D:\\Projects\\ffmpeg-python-interop\\pyff\\foo.py", "foo");
 
     return 0;
 }
@@ -522,6 +549,7 @@ static int query_formats(AVFilterContext *ctx)
 static int config_input(AVFilterLink *inlink)
 {
     PythonContext *s = inlink->dst->priv;
+
 
 
     /*s->hi_pixel_mask   = 0xFEFEFEFE;
@@ -593,7 +621,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     out->height = outlink->h;
 
     td.in = in, td.out = out;
-    fprintf(stderr, "HERE2\n");
+    fprintf(stderr, "HERE2\n"); fflush(stderr);
     ctx->internal->execute(ctx, pythonCallProcess, &td, NULL, 1/*FFMIN(in->height, ff_filter_get_nb_threads(ctx))*/);
 
 
@@ -621,11 +649,30 @@ static const AVFilterPad python_outputs[] = {
     { NULL }
 };
 
+static av_cold int init(AVFilterContext *ctx)
+{
+	PythonContext *s = ctx->priv;
+
+    char* python_library;
+	char* script_filename;
+	char* class_name;
+	char* constructor_argument;
+
+	fprintf(stderr, "python_library: %s\n", s->python_library); fflush(stderr);
+	fprintf(stderr, "script_filename: %s\n", s->script_filename); fflush(stderr);
+	fprintf(stderr, "class_name: %s\n", s->class_name); fflush(stderr);
+	fprintf(stderr, "constructor_argument: %s\n", s->constructor_argument); fflush(stderr);
+
+	return 0;
+}
+
 AVFilter ff_vf_python = {
     .name          = "python",
     .description   = NULL_IF_CONFIG_SMALL("Process the input using a python script."),
     .priv_size     = sizeof(PythonContext),
+    .priv_class    = &python_class,
     .query_formats = query_formats,
+	.init          = init,
     .inputs        = python_inputs,
     .outputs       = python_outputs,
     .flags         = 0/*AVFILTER_FLAG_SLICE_THREADS*/,
