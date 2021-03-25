@@ -104,12 +104,12 @@ typedef struct py_embed {
     lib_handle_t hlib;
 
     // Python C API loaded dynamically
-    void (*Py_Initialize)();
-    int (*Py_FinalizeEx)();
+    void (*Py_Initialize)(void);
+    int (*Py_FinalizeEx)(void);
     PyObject* (*Py_CompileStringObject)(const char *str, PyObject *filename, int start, PyCompilerFlags *flags, int optimize);
     PyObject* (*PyUnicode_DecodeFSDefault)(const char *s);
     PyObject* (*PyEval_EvalCode)(PyObject *co, PyObject *globals, PyObject *locals);
-    PyObject* (*PyDict_New)();
+    PyObject* (*PyDict_New)(void);
     PyObject* (*PyDict_GetItemString)(PyObject *p, const char *key);
     PyObject* (*PyTuple_New)(Py_ssize_t len);
     int (*PyTuple_SetItem)(PyObject *p, Py_ssize_t pos, PyObject *o);
@@ -119,18 +119,18 @@ typedef struct py_embed {
     PyObject* (*PyImport_ImportModule)(const char *name);
     PyObject* (*PyObject_GetAttrString)(PyObject *o, const char *attr_name);
     long (*PyLong_AsLong)(PyObject *obj);
-    void (*PyErr_Print)();
+    void (*PyErr_Print)(void);
     PyObject* (*PyDict_Copy)(PyObject *p);
-    PyObject* (*PyEval_GetBuiltins)();
+    PyObject* (*PyEval_GetBuiltins)(void);
     PyObject* (*PyImport_ExecCodeModuleEx)(const char *name, PyObject *co, const char *pathname);
 
-    wchar_t* (*Py_GetPath)();
+    wchar_t* (*Py_GetPath)(void);
     char* (*Py_EncodeLocale)(const wchar_t *text, size_t *error_pos);
-    wchar_t* (*Py_GetPythonHome)();
-    wchar_t* (*Py_GetProgramName)();
+    wchar_t* (*Py_GetPythonHome)(void);
+    wchar_t* (*Py_GetProgramName)(void);
     void (*Py_SetProgramName)(const wchar_t *name);
     wchar_t* (*Py_DecodeLocale)(const char* arg, size_t *size);
-    wchar_t* (*Py_GetExecPrefix)();
+    wchar_t* (*Py_GetExecPrefix)(void);
     void (*Py_SetPath)(const wchar_t *);
     void (*Py_SetPythonHome)(const wchar_t *home);
     void (*PySys_SetPath)(const wchar_t *path);
@@ -139,9 +139,6 @@ typedef struct py_embed {
     int file_input; // token for Python compile() telling that this is a module we're Python-compiling
     wchar_t* program_name; // what we set via Py_SetProgramName()
     wchar_t* python_home;
-
-    // fields for executing the filter
-    PyObject* user_module;	// the user module object
 } py_embed_t;
 
 static py_embed_t s_py = {NULL};
@@ -431,8 +428,7 @@ static int init_python_library_and_script(const char* dllfile, const char* pyfil
     return 0;
 }
 
-static int uninit_python_library_and_script() {
-    s_py.Py_DecRef(s_py.user_module);
+static int uninit_python_library_and_script(void) {
     s_py.Py_FinalizeEx();
     // TODO Check returning value
 
@@ -445,11 +441,8 @@ static int uninit_python_library_and_script() {
 }
 
 
-static int python_call(const char* func) {
-
-
-    PyObject* pyFunc = s_py.PyObject_GetAttrString(s_py.user_module, func);
-    s_py.Py_DecRef(s_py.user_module);
+static int python_call(PyObject* user_module, const char* func) {
+    PyObject* pyFunc = s_py.PyObject_GetAttrString(user_module, func);
     if (pyFunc == NULL) {
         s_py.PyErr_Print();
         return 77;
@@ -561,7 +554,7 @@ static int pythonCallProcess(AVFilterContext *ctx, void *arg, int jobnr, int nb_
 
     fprintf(stderr, "THREAD!!! %s\n", s->python_library); fflush(stderr);
 
-    int pycall_res = python_call(s->class_name);
+    int pycall_res = python_call(s->user_module, s->class_name);
 	fprintf(stderr, "python_call returns %d\n", pycall_res); fflush(stderr);
 
 	fflush(stdout);	// Flushes the python output
