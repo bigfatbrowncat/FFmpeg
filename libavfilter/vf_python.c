@@ -158,6 +158,7 @@ typedef struct py_embed {
     void (*PyMem_RawFree)(void *p);
     void* (*PyMem_RawMalloc)(size_t n);
     void* (*PyMem_RawCalloc)(size_t nelem, size_t elsize);
+    PyObject* (*PyMemoryView_FromMemory)(char *mem, Py_ssize_t size, int flags);
 
     // internal data for working with Python
     int file_input; // token for Python compile() telling that this is a module we're Python-compiling
@@ -215,6 +216,7 @@ static int fill_pyembed(lib_handle_t hpylib) {
     GET_FUNC(PyMem_RawFree);
     GET_FUNC(PyMem_RawMalloc);
     GET_FUNC(PyMem_RawCalloc);
+    GET_FUNC(PyMemoryView_FromMemory);
 
 #undef GET_FUNC
     return 0;
@@ -222,6 +224,10 @@ static int fill_pyembed(lib_handle_t hpylib) {
 
 #define ACQUIRE_PYGIL() (s_py.PyEval_RestoreThread(s_py.tstate))
 #define RELEASE_PYGIL() (s_py.tstate = s_py.PyEval_SaveThread())
+
+// stolen from Python/Include/object.h
+#define PyBUF_READ  0x100
+#define PyBUF_WRITE 0x200
 
 static wchar_t* _PyMem_RawWcsdup(const wchar_t *str)
 {
@@ -305,6 +311,7 @@ static int init_embed_python(const char* pylib) {
     }
 #endif
 
+    // FIXME: Py_Initialize() installs Ctrl-C handler - is this what we want?..
     s_py.Py_Initialize();
     {
         PyObject* modSymbol = s_py.PyImport_ImportModule("symbol");
@@ -557,61 +564,79 @@ static int uninit_python_library_and_script(void) {
     return 0;
 }
 
+typedef uint8_t ubool;
 
-static int python_call(PyObject* user_module, const char* func) {
-    ACQUIRE_PYGIL();
-    PyObject* pyFunc = s_py.PyObject_GetAttrString(user_module, func);
-    if (pyFunc == NULL) {
-        s_py.PyErr_Print();
-        RELEASE_PYGIL();
-        return 77;
+static inline ubool _pack_int(const int value, const int pos, PyObject* tup) {
+    PyObject* boxed = s_py.PyLong_FromLongLong(value);
+    if (boxed == NULL) return 0;
+    if (s_py.PyTuple_SetItem(tup, pos, boxed) != 0) {
+        s_py.Py_DecRef(boxed);
+        return 0;
     }
-
-    PyObject* args = s_py.PyTuple_New(2);
-    if (args == NULL) {
-        s_py.PyErr_Print();
-        RELEASE_PYGIL();
-        return 77;
-    }
-    PyObject* width = s_py.PyLong_FromLongLong(100);
-    if (width == NULL) {
-        s_py.PyErr_Print();
-        RELEASE_PYGIL();
-        return 77;
-    }
-    PyObject* height = s_py.PyLong_FromLongLong(200);
-    if (height == NULL) {
-        s_py.PyErr_Print();
-        RELEASE_PYGIL();
-        return 77;
-    }
-    if (s_py.PyTuple_SetItem(args, 0, width) != 0) {
-        s_py.PyErr_Print();
-        RELEASE_PYGIL();
-        return 77;
-    } else {
-        width = NULL; // note: "args" now own "width", do not decref it
-    }
-    if (s_py.PyTuple_SetItem(args, 1, height) != 0) {
-        s_py.PyErr_Print();
-        RELEASE_PYGIL();
-        return 77;
-    } else {
-        height = NULL; // note: "args" now own "height", too, do not decref it
-    }
-
-    PyObject* result = s_py.PyObject_CallObject(pyFunc, args);
-    if (result == NULL) {
-        // call failed, may be due to exception
-        s_py.PyErr_Print();
-        RELEASE_PYGIL();
-        return 88;
-    }
-
-    RELEASE_PYGIL();
-    return 0;
+    return 1;
 }
 
+static int python_call(PyObject* user_module, const char* func,
+        const int format, const int width, const int height,
+        const int* src_linesize, const int* dst_linesize,
+        uint8_t** src_data, uint8_t** dst_data) {
+
+    PyObject *py_func = NULL, *args = NULL, *tmp_tuple = NULL, *tmp_view = NULL, *result = NULL;
+    int i;
+    ACQUIRE_PYGIL();
+
+    if ((py_func = s_py.PyObject_GetAttrString(user_module, func)) == NULL) goto error;
+    if ((args = s_py.PyTuple_New(7)) == NULL) goto error;
+    if (!_pack_int(format, 0, args)) goto error;
+    if (!_pack_int(width, 1, args)) goto error;
+    if (!_pack_int(height, 2, args)) goto error;
+
+    if ((tmp_tuple = s_py.PyTuple_New(AV_NUM_DATA_POINTERS )) == NULL) goto error;
+    for(i = 0; i < AV_NUM_DATA_POINTERS ; i++) {
+        if (!_pack_int(src_linesize[i], i, tmp_tuple)) goto error;
+    }
+    if (s_py.PyTuple_SetItem(args, 3, tmp_tuple) != 0) goto error;
+
+    if ((tmp_tuple = s_py.PyTuple_New(AV_NUM_DATA_POINTERS )) == NULL) goto error;
+    for(i = 0; i < AV_NUM_DATA_POINTERS ; i++) {
+        if (!_pack_int(dst_linesize[i], i, tmp_tuple)) goto error;
+    }
+    if (s_py.PyTuple_SetItem(args, 4, tmp_tuple) != 0) goto error;
+
+    if ((tmp_tuple = s_py.PyTuple_New(AV_NUM_DATA_POINTERS )) == NULL) goto error;
+    for(i = 0; i < AV_NUM_DATA_POINTERS ; i++) {
+        if ((tmp_view = s_py.PyMemoryView_FromMemory(src_data[i], src_linesize[i]*height, PyBUF_READ)) == NULL) goto error;
+        if (s_py.PyTuple_SetItem(tmp_tuple, i, tmp_view) != 0) goto error;
+    }
+    if (s_py.PyTuple_SetItem(args, 5, tmp_tuple) != 0) goto error;
+
+    if ((tmp_tuple = s_py.PyTuple_New(AV_NUM_DATA_POINTERS )) == NULL) goto error;
+    for(i = 0; i < AV_NUM_DATA_POINTERS ; i++) {
+        if ((tmp_view = s_py.PyMemoryView_FromMemory(dst_data[i], dst_linesize[i]*height*4, PyBUF_WRITE)) == NULL) goto error;
+        if (s_py.PyTuple_SetItem(tmp_tuple, i, tmp_view) != 0) goto error;
+    }
+    if (s_py.PyTuple_SetItem(args, 6, tmp_tuple) != 0) goto error;
+
+    if ((result = s_py.PyObject_CallObject(py_func, args)) == NULL) goto error;
+
+    s_py.Py_DecRef(py_func);
+    s_py.Py_DecRef(args);
+    s_py.Py_DecRef(tmp_tuple);
+    s_py.Py_DecRef(tmp_view);
+    s_py.Py_DecRef(result);
+    RELEASE_PYGIL();
+
+    return 0;
+error:
+    s_py.PyErr_Print();
+    s_py.Py_DecRef(py_func);
+    s_py.Py_DecRef(args);
+    s_py.Py_DecRef(tmp_tuple);
+    s_py.Py_DecRef(tmp_view);
+    s_py.Py_DecRef(result);
+    RELEASE_PYGIL();
+    return 1;
+}
 
 
 
@@ -653,22 +678,19 @@ static int pythonCallProcess(AVFilterContext *ctx, void *arg, int jobnr, int nb_
     ThreadData *td = arg;
     AVFrame *in = td->in;
     AVFrame *out = td->out;
-    const uint8_t *src = in->data[0];
-    uint8_t *dst = out->data[0];
-    const int src_linesize = in->linesize[0];
-    const int dst_linesize = out->linesize[0];
-    const int width = in->width;
-    const int height = in->height;
 
-    const int slice_start = (height * jobnr) / nb_jobs;
-    const int slice_end = (height * (jobnr+1)) / nb_jobs;
+    //const int slice_start = (in->height * jobnr) / nb_jobs;
+    //const int slice_end = (in->height * (jobnr+1)) / nb_jobs;
 
     // Currently only one thread is supported here, so jobnr has to be 0 and nb_jobs should be 1
     if (s->user_module) {
-        fprintf(stderr, "THREAD!!! %s\n", s->python_library); fflush(stderr);
-
-        int pycall_res = python_call(s->user_module, s->class_name);
-        fprintf(stderr, "python_call returns %d\n", pycall_res); fflush(stderr);
+        // TODO: handle src_linesize != width, etc.
+        int pycall_res = python_call(s->user_module, s->class_name, 
+            in->format, in->width, in->height,
+            in->linesize, out->linesize, in->data, out->data);
+        if (pycall_res != 0) {
+            fprintf(stderr, "python_call returns %d\n", pycall_res); fflush(stderr);
+        }
 
         fflush(stdout);	// Flushes the python output
     }
@@ -767,7 +789,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     out->height = outlink->h;
 
     td.in = in, td.out = out;
-    fprintf(stderr, "HERE2\n"); fflush(stderr);
+    //fprintf(stderr, "HERE2\n"); fflush(stderr);
     ctx->internal->execute(ctx, pythonCallProcess, &td, NULL, 1/*FFMIN(in->height, ff_filter_get_nb_threads(ctx))*/);
 
 
