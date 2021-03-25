@@ -1,23 +1,5 @@
 /*
- * Copyright (c) 2010 Niel van der Westhuizen <nielkie@gmail.com>
- * Copyright (c) 2002 A'rpi
- * Copyright (c) 1997-2001 ZSNES Team ( zsknight@zsnes.com / _demo_@zsnes.com )
- *
- * This file is part of FFmpeg.
- *
- * FFmpeg is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * FFmpeg is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with FFmpeg; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ * Copyright (c) 2021 Dendygeeks
  */
 
 /**
@@ -117,6 +99,7 @@ typedef size_t Py_ssize_t;
 typedef struct py_embed {
     lib_handle_t hlib;
 
+    // Python C API loaded dynamically
     void (*Py_Initialize)();
     int (*Py_FinalizeEx)();
     PyObject* (*Py_CompileStringObject)(const char *str, PyObject *filename, int start, PyCompilerFlags *flags, int optimize);
@@ -148,14 +131,18 @@ typedef struct py_embed {
     void (*Py_SetPythonHome)(const wchar_t *home);
     void (*PySys_SetPath)(const wchar_t *path);
 
+    // internal data for working with Python
     int file_input; // token for Python compile() telling that this is a module we're Python-compiling
+    wchar_t* program_name; // what we set via Py_SetProgramName()
+    wchar_t* python_home;
 
+    // fields for executing the filter
     PyObject* user_module;	// the user module object
-
 } py_embed_t;
 
 static int fill_pyembed(lib_handle_t* pylib, py_embed_t* out) {
     if (out == NULL || pylib == NULL) return 1;
+    memset(out, 0, sizeof(py_embed_t));
 
 #define GET_FUNC(name)                          \
     out->name = pylib->get_sym(pylib, #name);   \
@@ -225,22 +212,24 @@ static wchar_t* get_dir_name(wchar_t* file_name) {
 }
 
 static int init_embed_python(py_embed_t* py, const char* pylib, const char* script_file) {
-    // TODO: clean up memory properly
-
     // set program name so on *nix Python can find its prefix from it
     size_t main_sz;
-    wchar_t* umain = py->Py_DecodeLocale(pylib, &main_sz);
-    if (umain == NULL) {
+    py->program_name = py->Py_DecodeLocale(pylib, &main_sz);
+    if (py->program_name == NULL) {
         printf("cannot decode '%s' into wchar_t: %d\n", pylib, (int)main_sz);
         return 77;
     }
-    py->Py_SetProgramName(umain); // do not free 'umain' until Py_FinalizeEx()!
+    py->Py_SetProgramName(py->program_name);
 
-    if (py->Py_GetPythonHome() == NULL && umain != NULL) {
+    if (py->Py_GetPythonHome() == NULL) {
         // flush path config cache, otherwise our manipulations with Python home won't be re-read by it
         py->Py_SetPath(NULL);
 #if defined(_WIN32) || defined(__CYGWIN__)
-        py->Py_SetPythonHome(get_dir_name(umain));
+        py->python_home = get_dir_name(py->program_name);
+        if (py->python_home == NULL) {
+            return 77;
+        }
+        py->Py_SetPythonHome(py->python_home);
 #else
 #error Implement me properly if needed
 #endif
@@ -269,40 +258,43 @@ static int init_embed_python(py_embed_t* py, const char* pylib, const char* scri
         return 77;
     }
     PyObject* pyFileInput = py->PyObject_GetAttrString(modSymbol, "file_input");
+    py->Py_DecRef(modSymbol);
     if (pyFileInput == NULL) {
         py->PyErr_Print();
         return 77;
     }
     long file_input = py->PyLong_AsLong(pyFileInput);
     py->Py_DecRef(pyFileInput);
-    py->Py_DecRef(modSymbol);
     if (file_input == -1) {
+        py->PyErr_Print();
         return 77;
     }
 
-    {
-        // append path to the script
-        wchar_t* sys_path = py->Py_GetPath();
-        wchar_t* uscript_file = py->Py_DecodeLocale(script_file, &main_sz);
-        if (uscript_file == NULL) {
-            return 99;
-        }
-        wchar_t* script_dir = get_dir_name(uscript_file);
-        if (script_dir == NULL) {
-            return 99;
-        }
-#if defined(_WIN32) || defined(__CYGWIN__)
-        wchar_t* path_sep = L";";
-#else
-        wchar_t* path_sep = L":";
-#endif
-        wchar_t* new_path = calloc(wcslen(sys_path) + wcslen(path_sep) + wcslen(script_dir) + 1, sizeof(wchar_t));
-        if (new_path == NULL) {
-            return 99;
-        }
-        wcscat(wcscat(wcscpy(new_path, sys_path), path_sep), script_dir);
-        py->PySys_SetPath(new_path);
+    // append path to the script
+    wchar_t* sys_path = py->Py_GetPath();
+    wchar_t* uscript_file = py->Py_DecodeLocale(script_file, &main_sz);
+    if (uscript_file == NULL) {
+        return 99;
     }
+    wchar_t* script_dir = get_dir_name(uscript_file);
+    free(uscript_file);
+    if (script_dir == NULL) {
+        return 99;
+    }
+#if defined(_WIN32) || defined(__CYGWIN__)
+    wchar_t* path_sep = L";";
+#else
+    wchar_t* path_sep = L":";
+#endif
+    wchar_t* new_path = calloc(wcslen(sys_path) + wcslen(path_sep) + wcslen(script_dir) + 1, sizeof(wchar_t));
+    if (new_path == NULL) {
+        free(script_dir);
+        return 99;
+    }
+    wcscat(wcscat(wcscpy(new_path, sys_path), path_sep), script_dir);
+    py->PySys_SetPath(new_path);
+    free(script_dir);
+    free(new_path);
 
     // "import site" and run "site.main()" to override weird behaviour of site.py not being imported in some cases
     // TODO: understand why site.py is not imported in some cases
@@ -312,13 +304,14 @@ static int init_embed_python(py_embed_t* py, const char* pylib, const char* scri
         return 77;
     }
     PyObject* siteMain = py->PyObject_GetAttrString(siteModule, "main");
+    py->Py_DecRef(siteModule);
     if (siteMain == NULL) {
         py->PyErr_Print();
         return 77;
     }
-    py->Py_DecRef(siteModule);
     PyObject* noArgs = py->PyTuple_New(0);
     if (noArgs == NULL) {
+        py->Py_DecRef(siteMain);
         py->PyErr_Print();
         return 77;
     }
@@ -416,11 +409,14 @@ static int init_python_library_and_script(const char* dllfile, const char* pyfil
     return 0;
 }
 
-static int uninit_python_library_and_script(py_embed_t* py_funcs) {
-    py_funcs->Py_FinalizeEx();
+static int uninit_python_library_and_script(py_embed_t* py) {
+    py->Py_DecRef(py->user_module);
+    py->Py_FinalizeEx();
     // TODO Check returning value
 
-    py_funcs->hlib.close(&py_funcs->hlib);
+    free(py->program_name);
+    free(py->python_home);
+    py->hlib.close(&py->hlib);
     // TODO Check error??
 
     return 0;
