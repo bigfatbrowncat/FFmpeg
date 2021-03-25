@@ -155,6 +155,9 @@ typedef struct py_embed {
 
     PyThreadState* (*PyEval_SaveThread)(void);
     void (*PyEval_RestoreThread)(PyThreadState *tstate);
+    void (*PyMem_RawFree)(void *p);
+    void* (*PyMem_RawMalloc)(size_t n);
+    void* (*PyMem_RawCalloc)(size_t nelem, size_t elsize);
 
     // internal data for working with Python
     int file_input; // token for Python compile() telling that this is a module we're Python-compiling
@@ -209,6 +212,9 @@ static int fill_pyembed(lib_handle_t hpylib) {
 
     GET_FUNC(PyEval_SaveThread);
     GET_FUNC(PyEval_RestoreThread);
+    GET_FUNC(PyMem_RawFree);
+    GET_FUNC(PyMem_RawMalloc);
+    GET_FUNC(PyMem_RawCalloc);
 
 #undef GET_FUNC
     return 0;
@@ -217,9 +223,26 @@ static int fill_pyembed(lib_handle_t hpylib) {
 #define ACQUIRE_PYGIL() (s_py.PyEval_RestoreThread(s_py.tstate))
 #define RELEASE_PYGIL() (s_py.tstate = s_py.PyEval_SaveThread())
 
+static wchar_t* _PyMem_RawWcsdup(const wchar_t *str)
+{
+    size_t len = wcslen(str), size;
+    wchar_t* str2;
+    if (len > (size_t)MAXINT / sizeof(wchar_t) - 1) {
+        return NULL;
+    }
+
+    size = (len + 1) * sizeof(wchar_t);
+    str2 = s_py.PyMem_RawMalloc(size);
+    if (str2 == NULL) {
+        return NULL;
+    }
+
+    memcpy(str2, str, size);
+    return str2;
+}
+
 
 static wchar_t* get_dir_name(wchar_t* file_name) {
-    // TODO: use PyMem-based allocators
     wchar_t* stop = file_name + wcslen(file_name) - 1;
 
 #if defined(_WIN32) || defined(__CYGWIN__)
@@ -229,16 +252,16 @@ static wchar_t* get_dir_name(wchar_t* file_name) {
 #endif
     if (stop < file_name) {
         // no slash found
-        return wcsdup(L"");
+        return _PyMem_RawWcsdup(L"");
     } else if (stop == file_name) {
         // case of file_name == "\python.dll"
 #if defined(_WIN32) || defined(__CYGWIN__)
-        return wcsdup(L"\\");
+        return _PyMem_RawWcsdup(L"\\");
 #else
-        return wcsdup(L"/");
+        return _PyMem_RawWcsdup(L"/");
 #endif
     } else {
-        wchar_t* udir = wcsdup(file_name);
+        wchar_t* udir = _PyMem_RawWcsdup(file_name);
         udir[stop - file_name] = 0;
         return udir;
     }
@@ -276,7 +299,7 @@ static int init_embed_python(const char* pylib) {
         wchar_t* uprog = s_py.Py_GetProgramName();
         wchar_t* upref = s_py.Py_GetExecPrefix();
         wchar_t* upath = s_py.Py_GetPath();
-        printf("home = %S\nprog = %S\nexec = %S\npath=%S\n", uhome, uprog, upref, upath);
+        printf("home = %S\nprog = %S\nexec = %S\npath = %S\n", uhome, uprog, upref, upath);
         fflush(stdout);
         // DEBUG things end
     }
@@ -332,21 +355,21 @@ static int update_sys_path(const char* script_file) {
             return 1;
         }
         script_dir = get_dir_name(uscript_file);
-        free(uscript_file);
+        s_py.PyMem_RawFree(uscript_file);
         if (script_dir == NULL) {
             RELEASE_PYGIL();
             return 2;
         }
-        new_path = calloc(wcslen(sys_path) + wcslen(path_sep) + wcslen(script_dir) + 1, sizeof(wchar_t));
+        new_path = s_py.PyMem_RawCalloc(wcslen(sys_path) + wcslen(path_sep) + wcslen(script_dir) + 1, sizeof(wchar_t));
         if (new_path == NULL) {
-            free(script_dir);
+            s_py.PyMem_RawFree(script_dir);
             RELEASE_PYGIL();
             return 3;
         }
         wcscat(wcscat(wcscpy(new_path, sys_path), path_sep), script_dir);
         s_py.PySys_SetPath(new_path);
-        free(script_dir);
-        free(new_path);
+        s_py.PyMem_RawFree(script_dir);
+        s_py.PyMem_RawFree(new_path);
     }
 
     {
@@ -521,8 +544,8 @@ static int uninit_python_library_and_script(void) {
     s_py.Py_FinalizeEx();
     // TODO Check returning value
 
-    free(s_py.program_name);
-    free(s_py.python_home);
+    s_py.PyMem_RawFree(s_py.program_name);
+    s_py.PyMem_RawFree(s_py.python_home);
     s_py.hlib.close(&s_py.hlib);
     // TODO Check error??
 
