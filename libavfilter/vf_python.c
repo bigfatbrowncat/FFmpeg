@@ -197,6 +197,9 @@ static int fill_pyembed(lib_handle_t hpylib) {
     return 0;
 }
 
+#define ACQUIRE_PYGIL() (s_py.PyEval_RestoreThread(s_py.tstate))
+#define RELEASE_PYGIL() (s_py.tstate = s_py.PyEval_SaveThread())
+
 
 static wchar_t* get_dir_name(wchar_t* file_name) {
     // TODO: use PyMem-based allocators
@@ -269,34 +272,34 @@ static int init_embed_python(const char* pylib) {
         long file_input;
         if (modSymbol == NULL) {
             s_py.PyErr_Print();
-            s_py.tstate = s_py.PyEval_SaveThread();
+            RELEASE_PYGIL();
             return -1;
         }
         pyFileInput = s_py.PyObject_GetAttrString(modSymbol, "file_input");
         s_py.Py_DecRef(modSymbol);
         if (pyFileInput == NULL) {
             s_py.PyErr_Print();
-            s_py.tstate = s_py.PyEval_SaveThread();
+            RELEASE_PYGIL();
             return -2;
         }
         file_input = s_py.PyLong_AsLong(pyFileInput);
         s_py.Py_DecRef(pyFileInput);
         if (file_input == -1) {
             s_py.PyErr_Print();
-            s_py.tstate = s_py.PyEval_SaveThread();
+            RELEASE_PYGIL();
             return -3;
         }
         s_py.file_input = file_input;
     }
 
     // release the GIL, per Python control flow
-    s_py.tstate = s_py.PyEval_SaveThread();
+    RELEASE_PYGIL();
 
     return 0;
 }
 
 static int update_sys_path(const char* script_file) {
-    s_py.PyEval_RestoreThread(s_py.tstate);
+    ACQUIRE_PYGIL();
     {
         // append path to the script
         wchar_t* sys_path = s_py.Py_GetPath();
@@ -308,19 +311,19 @@ static int update_sys_path(const char* script_file) {
         const wchar_t* path_sep = L":";
 #endif
         if (uscript_file == NULL) {
-            s_py.tstate = s_py.PyEval_SaveThread();
+            RELEASE_PYGIL();
             return 1;
         }
         script_dir = get_dir_name(uscript_file);
         free(uscript_file);
         if (script_dir == NULL) {
-            s_py.tstate = s_py.PyEval_SaveThread();
+            RELEASE_PYGIL();
             return 2;
         }
         new_path = calloc(wcslen(sys_path) + wcslen(path_sep) + wcslen(script_dir) + 1, sizeof(wchar_t));
         if (new_path == NULL) {
             free(script_dir);
-            s_py.tstate = s_py.PyEval_SaveThread();
+            RELEASE_PYGIL();
             return 3;
         }
         wcscat(wcscat(wcscpy(new_path, sys_path), path_sep), script_dir);
@@ -336,21 +339,21 @@ static int update_sys_path(const char* script_file) {
         PyObject *siteMain, *noArgs, *siteMainRes;
         if (siteModule == NULL) {
             s_py.PyErr_Print();
-            s_py.tstate = s_py.PyEval_SaveThread();
+            RELEASE_PYGIL();
             return -1;
         }
         siteMain = s_py.PyObject_GetAttrString(siteModule, "main");
         s_py.Py_DecRef(siteModule);
         if (siteMain == NULL) {
             s_py.PyErr_Print();
-            s_py.tstate = s_py.PyEval_SaveThread();
+            RELEASE_PYGIL();
             return -2;
         }
         noArgs = s_py.PyTuple_New(0);
         if (noArgs == NULL) {
             s_py.Py_DecRef(siteMain);
             s_py.PyErr_Print();
-            s_py.tstate = s_py.PyEval_SaveThread();
+            RELEASE_PYGIL();
             return -3;
         }
         siteMainRes = s_py.PyObject_CallObject(siteMain, noArgs);
@@ -358,13 +361,13 @@ static int update_sys_path(const char* script_file) {
         s_py.Py_DecRef(noArgs);
         if (siteMainRes == NULL) {
             s_py.PyErr_Print();
-            s_py.tstate = s_py.PyEval_SaveThread();
+            RELEASE_PYGIL();
             return -4;
         }
         s_py.Py_DecRef(siteMainRes);
     }
 
-    s_py.tstate = s_py.PyEval_SaveThread();
+    RELEASE_PYGIL();
     return 0;
 }
 
@@ -438,7 +441,7 @@ typedef struct PythonContext {
 
 static int init_pycontext(PythonContext* ctx) {
     int res;
-    s_py.PyEval_RestoreThread(s_py.tstate);
+    ACQUIRE_PYGIL();
 
     res = get_user_module(ctx->script_filename, &(ctx->user_module));
     fprintf(stderr, "get_user_module returns %d\n", res);
@@ -446,20 +449,20 @@ static int init_pycontext(PythonContext* ctx) {
         if (res < 0) {
             s_py.PyErr_Print();
         }
-        s_py.tstate = s_py.PyEval_SaveThread();
+        RELEASE_PYGIL();
         return 2;
     }
-    s_py.tstate = s_py.PyEval_SaveThread();
+    RELEASE_PYGIL();
 
     return 0;
 }
 
 static int uninit_pycontext(PythonContext* ctx) {
-    s_py.PyEval_RestoreThread(s_py.tstate);
+    ACQUIRE_PYGIL();
 
     s_py.Py_DecRef(ctx->user_module);
 
-    s_py.tstate = s_py.PyEval_SaveThread();
+    RELEASE_PYGIL();
     return 0;
 }
 
@@ -494,7 +497,7 @@ static int init_python_library_and_script(const char* dllfile, const char* pyfil
 
 static int uninit_python_library_and_script(void) {
     if (s_py.tstate != NULL) {
-        s_py.PyEval_RestoreThread(s_py.tstate);
+        ACQUIRE_PYGIL();
     }
     s_py.Py_FinalizeEx();
     // TODO Check returning value
@@ -509,35 +512,42 @@ static int uninit_python_library_and_script(void) {
 
 
 static int python_call(PyObject* user_module, const char* func) {
+    ACQUIRE_PYGIL();
     PyObject* pyFunc = s_py.PyObject_GetAttrString(user_module, func);
     if (pyFunc == NULL) {
         s_py.PyErr_Print();
+        RELEASE_PYGIL();
         return 77;
     }
 
     PyObject* args = s_py.PyTuple_New(2);
     if (args == NULL) {
         s_py.PyErr_Print();
+        RELEASE_PYGIL();
         return 77;
     }
     PyObject* width = s_py.PyLong_FromLongLong(100);
     if (width == NULL) {
         s_py.PyErr_Print();
+        RELEASE_PYGIL();
         return 77;
     }
     PyObject* height = s_py.PyLong_FromLongLong(200);
     if (height == NULL) {
         s_py.PyErr_Print();
+        RELEASE_PYGIL();
         return 77;
     }
     if (s_py.PyTuple_SetItem(args, 0, width) != 0) {
         s_py.PyErr_Print();
+        RELEASE_PYGIL();
         return 77;
     } else {
         width = NULL; // note: "args" now own "width", do not decref it
     }
     if (s_py.PyTuple_SetItem(args, 1, height) != 0) {
         s_py.PyErr_Print();
+        RELEASE_PYGIL();
         return 77;
     } else {
         height = NULL; // note: "args" now own "height", too, do not decref it
@@ -547,9 +557,11 @@ static int python_call(PyObject* user_module, const char* func) {
     if (result == NULL) {
         // call failed, may be due to exception
         s_py.PyErr_Print();
+        RELEASE_PYGIL();
         return 88;
     }
 
+    RELEASE_PYGIL();
     return 0;
 }
 
