@@ -62,24 +62,26 @@ static void libdl_closelib(struct lib_handle_t* self) {
 static int open_lib(const char* libname, lib_handle_t* out) {
     if (!out) return 1;
 #if defined(WINLIN) || defined(_WIN32)
-    HANDLE hLib = LoadLibraryA(libname);
-    if (hLib == NULL) {
+    {
+        HANDLE hLib = LoadLibraryA(libname);
+        if (hLib == NULL) {
 #ifdef WINLIN
-        // try dlopen if LoadLibraryA failed
-        void* lib = dlopen(libname, RTLD_LAZY);
-        if (lib == NULL) return 2;
-        out->handle = lib;
-        out->get_sym = libdl_getsym;
-        out->close = libdl_closelib;
-        return 0;
+            // try dlopen if LoadLibraryA failed
+            void* lib = dlopen(libname, RTLD_LAZY);
+            if (lib == NULL) return 2;
+            out->handle = lib;
+            out->get_sym = libdl_getsym;
+            out->close = libdl_closelib;
+            return 0;
 #else
-        return 2;
+            return 2;
 #endif
+        }
+        out->handle = (void*)hLib;
+        out->get_sym = win32_getsym;
+        out->close = win32_closelib;
+        return 0;
     }
-    out->handle = (void*)hLib;
-    out->get_sym = win32_getsym;
-    out->close = win32_closelib;
-    return 0;
 #elif defined(__linux__)
     void* lib = dlopen(libname, RTLD_LAZY);
     if (lib == NULL) return 2;
@@ -236,111 +238,121 @@ static int init_embed_python(py_embed_t* py, const char* pylib, const char* scri
     }
 
 #ifdef _WIN32
-    // DEBUG things start
-    wchar_t* uhome = py->Py_GetPythonHome();
-    wchar_t* uprog = py->Py_GetProgramName();
-    wchar_t* upref = py->Py_GetExecPrefix();
-    printf("home = %S\nprog = %S\nexec = %S\n", uhome, uprog, upref);
-    fflush(stdout);
-    // DEBUG things end
-
-    // DEBUG things start
-    wchar_t* upath = py->Py_GetPath();
-    printf("path = %S\n", upath);
-    fflush(stdout);
-    // DEBUG things end
+    {
+        // DEBUG things start
+        wchar_t* uhome = py->Py_GetPythonHome();
+        wchar_t* uprog = py->Py_GetProgramName();
+        wchar_t* upref = py->Py_GetExecPrefix();
+        wchar_t* upath = py->Py_GetPath();
+        printf("home = %S\nprog = %S\nexec = %S\npath=%S\n", uhome, uprog, upref, upath);
+        fflush(stdout);
+        // DEBUG things end
+    }
 #endif
 
     py->Py_Initialize();
-    PyObject* modSymbol = py->PyImport_ImportModule("symbol");
-    if (modSymbol == NULL) {
-        py->PyErr_Print();
-        return 77;
-    }
-    PyObject* pyFileInput = py->PyObject_GetAttrString(modSymbol, "file_input");
-    py->Py_DecRef(modSymbol);
-    if (pyFileInput == NULL) {
-        py->PyErr_Print();
-        return 77;
-    }
-    long file_input = py->PyLong_AsLong(pyFileInput);
-    py->Py_DecRef(pyFileInput);
-    if (file_input == -1) {
-        py->PyErr_Print();
-        return 77;
+    {
+        PyObject* modSymbol = py->PyImport_ImportModule("symbol");
+        PyObject* pyFileInput;
+        long file_input;
+        if (modSymbol == NULL) {
+            py->PyErr_Print();
+            return 77;
+        }
+        pyFileInput = py->PyObject_GetAttrString(modSymbol, "file_input");
+        py->Py_DecRef(modSymbol);
+        if (pyFileInput == NULL) {
+            py->PyErr_Print();
+            return 77;
+        }
+        file_input = py->PyLong_AsLong(pyFileInput);
+        py->Py_DecRef(pyFileInput);
+        if (file_input == -1) {
+            py->PyErr_Print();
+            return 77;
+        }
+        py->file_input = file_input;
     }
 
-    // append path to the script
-    wchar_t* sys_path = py->Py_GetPath();
-    wchar_t* uscript_file = py->Py_DecodeLocale(script_file, &main_sz);
-    if (uscript_file == NULL) {
-        return 99;
-    }
-    wchar_t* script_dir = get_dir_name(uscript_file);
-    free(uscript_file);
-    if (script_dir == NULL) {
-        return 99;
-    }
+    {
+        // append path to the script
+        wchar_t* sys_path = py->Py_GetPath();
+        wchar_t* uscript_file = py->Py_DecodeLocale(script_file, &main_sz);
+        wchar_t *script_dir, *new_path;
 #if defined(_WIN32) || defined(__CYGWIN__)
-    wchar_t* path_sep = L";";
+        const wchar_t* path_sep = L";";
 #else
-    wchar_t* path_sep = L":";
+        const wchar_t* path_sep = L":";
 #endif
-    wchar_t* new_path = calloc(wcslen(sys_path) + wcslen(path_sep) + wcslen(script_dir) + 1, sizeof(wchar_t));
-    if (new_path == NULL) {
+        if (uscript_file == NULL) {
+            return 99;
+        }
+        script_dir = get_dir_name(uscript_file);
+        free(uscript_file);
+        if (script_dir == NULL) {
+            return 99;
+        }
+        new_path = calloc(wcslen(sys_path) + wcslen(path_sep) + wcslen(script_dir) + 1, sizeof(wchar_t));
+        if (new_path == NULL) {
+            free(script_dir);
+            return 99;
+        }
+        wcscat(wcscat(wcscpy(new_path, sys_path), path_sep), script_dir);
+        py->PySys_SetPath(new_path);
         free(script_dir);
-        return 99;
+        free(new_path);
     }
-    wcscat(wcscat(wcscpy(new_path, sys_path), path_sep), script_dir);
-    py->PySys_SetPath(new_path);
-    free(script_dir);
-    free(new_path);
 
-    // "import site" and run "site.main()" to override weird behaviour of site.py not being imported in some cases
-    // TODO: understand why site.py is not imported in some cases
-    PyObject* siteModule = py->PyImport_ImportModule("site");
-    if (siteModule == NULL) {
-        py->PyErr_Print();
-        return 77;
-    }
-    PyObject* siteMain = py->PyObject_GetAttrString(siteModule, "main");
-    py->Py_DecRef(siteModule);
-    if (siteMain == NULL) {
-        py->PyErr_Print();
-        return 77;
-    }
-    PyObject* noArgs = py->PyTuple_New(0);
-    if (noArgs == NULL) {
+    {
+        // "import site" and run "site.main()" to override weird behaviour of site.py not being imported in some cases
+        // TODO: understand why site.py is not imported in some cases
+        PyObject* siteModule = py->PyImport_ImportModule("site");
+        PyObject *siteMain, *noArgs, *siteMainRes;
+        if (siteModule == NULL) {
+            py->PyErr_Print();
+            return 77;
+        }
+        siteMain = py->PyObject_GetAttrString(siteModule, "main");
+        py->Py_DecRef(siteModule);
+        if (siteMain == NULL) {
+            py->PyErr_Print();
+            return 77;
+        }
+        noArgs = py->PyTuple_New(0);
+        if (noArgs == NULL) {
+            py->Py_DecRef(siteMain);
+            py->PyErr_Print();
+            return 77;
+        }
+        siteMainRes = py->PyObject_CallObject(siteMain, noArgs);
         py->Py_DecRef(siteMain);
-        py->PyErr_Print();
-        return 77;
+        py->Py_DecRef(noArgs);
+        if (siteMainRes == NULL) {
+            py->PyErr_Print();
+            return 77;
+        }
+        py->Py_DecRef(siteMainRes);
     }
-    PyObject* siteMainRes = py->PyObject_CallObject(siteMain, noArgs);
-    py->Py_DecRef(siteMain);
-    py->Py_DecRef(noArgs);
-    if (siteMainRes == NULL) {
-        py->PyErr_Print();
-        return 77;
-    }
-    py->Py_DecRef(siteMainRes);
-
-    py->file_input = file_input;
 
     return 0;
 }
 
 static int get_user_module(py_embed_t* py, const char* script_file, PyObject** result) {
+    FILE* fp;
+    long long size, read;
+    char* buf;
+   
     if (py == NULL || script_file == NULL || result == NULL) return 1;
 
-    FILE* fp = fopen(script_file, "rb");
+    fp = fopen(script_file, "rb");
     if (fp == NULL) return 3;
     if (fseek(fp, 0, SEEK_END) != 0) {
         fclose(fp);
         //printf("cannot get size of '%s'\n", script_file);
         return 2;
     }
-    long long size = ftell(fp);
-    char* buf = calloc(size+1, 1);
+    size = ftell(fp);
+    buf = calloc(size+1, 1);
     if (buf == NULL) {
         fclose(fp);
         return 3;
@@ -350,7 +362,7 @@ static int get_user_module(py_embed_t* py, const char* script_file, PyObject** r
         free(buf);
         return 4;
     }
-    long long read = fread(buf, 1, size, fp);
+    read = fread(buf, 1, size, fp);
     if (read != size) {
         fclose(fp);
         free(buf);
@@ -359,23 +371,26 @@ static int get_user_module(py_embed_t* py, const char* script_file, PyObject** r
     }
     fclose(fp);
 
-    PyObject* pName = py->PyUnicode_DecodeFSDefault(script_file);
-    if (pName == NULL) {
-        return -1;
-    }
+    {
+        PyObject *code, *res;
+        PyObject* pName = py->PyUnicode_DecodeFSDefault(script_file);
+        if (pName == NULL) {
+            return -1;
+        }
 
-    PyObject* code = py->Py_CompileStringObject(buf, pName, py->file_input, NULL, 1);
-    py->Py_DecRef(pName);
-    if (code == NULL) {
-        return -2;
-    }
-    PyObject* res = py->PyImport_ExecCodeModuleEx("__main__", code, script_file);
-    py->Py_DecRef(code);
-    if (res == NULL) {
-        return -3;
-    }
+        code = py->Py_CompileStringObject(buf, pName, py->file_input, NULL, 1);
+        py->Py_DecRef(pName);
+        if (code == NULL) {
+            return -2;
+        }
+        res = py->PyImport_ExecCodeModuleEx("__main__", code, script_file);
+        py->Py_DecRef(code);
+        if (res == NULL) {
+            return -3;
+        }
 
-    *result = res;
+        *result = res;
+    }
     return 0;
 }
 
@@ -398,12 +413,14 @@ static int init_python_library_and_script(const char* dllfile, const char* pyfil
     }
 
 
-    int user_module_res = get_user_module(py_funcs, pyfile, &(py_funcs->user_module));
-    if (user_module_res != 0) {
-        if (user_module_res < 0) {
-            py_funcs->PyErr_Print();
+    {
+        int user_module_res = get_user_module(py_funcs, pyfile, &(py_funcs->user_module));
+        if (user_module_res != 0) {
+            if (user_module_res < 0) {
+                py_funcs->PyErr_Print();
+            }
+            return 4;
         }
-        return 4;
     }
 
     return 0;
@@ -670,17 +687,20 @@ static const AVFilterPad python_outputs[] = {
 
 static av_cold int init(AVFilterContext *ctx)
 {
-	PythonContext *s = ctx->priv;
+    int init_res;
+    PythonContext *s = ctx->priv;
 
-	fprintf(stderr, "python_library: %s\n", s->python_library); fflush(stderr);
-	fprintf(stderr, "script_filename: %s\n", s->script_filename); fflush(stderr);
-	fprintf(stderr, "class_name: %s\n", s->class_name); fflush(stderr);
-	fprintf(stderr, "constructor_argument: %s\n", s->constructor_argument); fflush(stderr);
+    fprintf(stderr, "python_library: %s\n", s->python_library); fflush(stderr);
+    fprintf(stderr, "script_filename: %s\n", s->script_filename); fflush(stderr);
+    fprintf(stderr, "class_name: %s\n", s->class_name); fflush(stderr);
+    fprintf(stderr, "constructor_argument: %s\n", s->constructor_argument); fflush(stderr);
 
-	int init_res = init_python_library_and_script(s->python_library, s->script_filename, &s->py_funcs);
-	fprintf(stderr, "init_python_library_and_script returns %d\n", init_res);
+    init_res = init_python_library_and_script(s->python_library, s->script_filename, &s->py_funcs);
+    fprintf(stderr, "init_python_library_and_script returns %d\n", init_res);
 
-	return 0;
+    fflush(stderr);
+
+    return 0;
 }
 
 static void uninit(AVFilterContext *ctx)
