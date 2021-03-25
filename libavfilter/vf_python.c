@@ -115,6 +115,8 @@ typedef struct PyCompilerFlags_ PyCompilerFlags;
 typedef size_t Py_ssize_t;
 
 typedef struct py_embed {
+    lib_handle_t hlib;
+
     void (*Py_Initialize)();
     int (*Py_FinalizeEx)();
     PyObject* (*Py_CompileStringObject)(const char *str, PyObject *filename, int start, PyCompilerFlags *flags, int optimize);
@@ -147,6 +149,9 @@ typedef struct py_embed {
     void (*PySys_SetPath)(const wchar_t *path);
 
     int file_input; // token for Python compile() telling that this is a module we're Python-compiling
+
+    PyObject* user_module;	// the user module object
+
 } py_embed_t;
 
 static int fill_pyembed(lib_handle_t* pylib, py_embed_t* out) {
@@ -381,76 +386,92 @@ static int get_user_module(py_embed_t* py, const char* script_file, PyObject** r
     return 0;
 }
 
-static int pycall(const char* dllfile, const char* pyfile, const char* func) {
-    lib_handle_t hlib;
-    if (open_lib(dllfile, &hlib) != 0) {
+// Interface from python wrapper to the filter
+
+
+static int init_python_library_and_script(const char* dllfile, const char* pyfile, py_embed_t* py_funcs) {
+    if (open_lib(dllfile, &py_funcs->hlib) != 0) {
         return 1;
     }
 
-    py_embed_t py_funcs;
-    if (fill_pyembed(&hlib, &py_funcs) != 0) {
-        hlib.close(&hlib);
+    if (fill_pyembed(&py_funcs->hlib, py_funcs) != 0) {
+        //py_funcs->hlib.close(py_funcs->hlib);	// We don't close the lib here, closing in the uninit instead
         return 2;
     }
 
-    if (init_embed_python(&py_funcs, dllfile, pyfile) != 0) {
-        hlib.close(&hlib);
+    if (init_embed_python(py_funcs, dllfile, pyfile) != 0) {
+    	//py_funcs->hlib.close(py_funcs->hlib); // We don't close the lib here, closing in the uninit instead
         return 3;
     }
 
-    PyObject* res;
-    int user_module_res = get_user_module(&py_funcs, pyfile, &res);
+
+    int user_module_res = get_user_module(py_funcs, pyfile, &(py_funcs->user_module));
     if (user_module_res != 0) {
         if (user_module_res < 0) {
-            py_funcs.PyErr_Print();
+            py_funcs->PyErr_Print();
         }
         return 4;
     }
 
-    PyObject* pyFunc = py_funcs.PyObject_GetAttrString(res, func);
-    py_funcs.Py_DecRef(res);
+    return 0;
+}
+
+static int uninit_python_library_and_script(py_embed_t* py_funcs) {
+    py_funcs->Py_FinalizeEx();
+    // TODO Check returning value
+
+    py_funcs->hlib.close(&py_funcs->hlib);
+    // TODO Check error??
+
+    return 0;
+}
+
+
+static int python_call(const char* func, py_embed_t* py_funcs) {
+
+
+    PyObject* pyFunc = py_funcs->PyObject_GetAttrString(py_funcs->user_module, func);
+    py_funcs->Py_DecRef(py_funcs->user_module);
     if (pyFunc == NULL) {
-        py_funcs.PyErr_Print();
+        py_funcs->PyErr_Print();
         return 77;
     }
 
-    PyObject* args = py_funcs.PyTuple_New(2);
+    PyObject* args = py_funcs->PyTuple_New(2);
     if (args == NULL) {
-        py_funcs.PyErr_Print();
+        py_funcs->PyErr_Print();
         return 77;
     }
-    PyObject* width = py_funcs.PyLong_FromLongLong(100);
+    PyObject* width = py_funcs->PyLong_FromLongLong(100);
     if (width == NULL) {
-        py_funcs.PyErr_Print();
+        py_funcs->PyErr_Print();
         return 77;
     }
-    PyObject* height = py_funcs.PyLong_FromLongLong(200);
+    PyObject* height = py_funcs->PyLong_FromLongLong(200);
     if (height == NULL) {
-        py_funcs.PyErr_Print();
+        py_funcs->PyErr_Print();
         return 77;
     }
-    if (py_funcs.PyTuple_SetItem(args, 0, width) != 0) {
-        py_funcs.PyErr_Print();
+    if (py_funcs->PyTuple_SetItem(args, 0, width) != 0) {
+        py_funcs->PyErr_Print();
         return 77;
     } else {
         width = NULL; // note: "args" now own "width", do not decref it
     }
-    if (py_funcs.PyTuple_SetItem(args, 1, height) != 0) {
-        py_funcs.PyErr_Print();
+    if (py_funcs->PyTuple_SetItem(args, 1, height) != 0) {
+        py_funcs->PyErr_Print();
         return 77;
     } else {
         height = NULL; // note: "args" now own "height", too, do not decref it
     }
 
-    PyObject* result = py_funcs.PyObject_CallObject(pyFunc, args);
+    PyObject* result = py_funcs->PyObject_CallObject(pyFunc, args);
     if (result == NULL) {
         // call failed, may be due to exception
-        py_funcs.PyErr_Print();
+        py_funcs->PyErr_Print();
         return 88;
     }
 
-    py_funcs.Py_FinalizeEx();
-    hlib.close(&hlib);
     return 0;
 }
 
@@ -465,16 +486,8 @@ typedef struct PythonContext {
 	char* script_filename;
 	char* class_name;
 	char* constructor_argument;
-    /* masks used for two pixels interpolation */
-//    uint32_t hi_pixel_mask;
-//    uint32_t lo_pixel_mask;
 
-    /* masks used for four pixels interpolation */
-//    uint32_t q_hi_pixel_mask;
-//    uint32_t q_lo_pixel_mask;
-
-//    int bpp; ///< bytes per pixel, pixel stride for each (packed) pixel
-//    int is_be;
+	py_embed_t py_funcs;
 } PythonContext;
 
 
@@ -501,6 +514,11 @@ AVFILTER_DEFINE_CLASS(python);
 
 
 
+
+
+
+
+
 typedef struct ThreadData {
     AVFrame *in, *out;
 } ThreadData;
@@ -524,7 +542,12 @@ static int pythonCallProcess(AVFilterContext *ctx, void *arg, int jobnr, int nb_
     // Currently only one thread is supported here, so jobnr has to be 0 and nb_jobs should be 1
 
     fprintf(stderr, "THREAD!!! %s\n", s->python_library); fflush(stderr);
-    pycall(s->python_library, s->script_filename, s->class_name);
+
+    int pycall_res = python_call(s->class_name, &s->py_funcs);
+	fprintf(stderr, "python_call returns %d\n", pycall_res); fflush(stderr);
+
+	fflush(stdout);	// Flushes the python output
+
     //pycall("d:\\Anaconda3\\envs\\tensorflow-cl\\python36.dll", "D:\\Projects\\ffmpeg-python-interop\\pyff\\foo.py", "foo");
 
     return 0;
@@ -550,7 +573,7 @@ static int config_input(AVFilterLink *inlink)
 {
     PythonContext *s = inlink->dst->priv;
 
-
+    // TODO Here we should call a function that takes (w_in, h_in) and returns (w_out, h_out)
 
     /*s->hi_pixel_mask   = 0xFEFEFEFE;
     s->lo_pixel_mask   = 0x01010101;
@@ -653,18 +676,25 @@ static av_cold int init(AVFilterContext *ctx)
 {
 	PythonContext *s = ctx->priv;
 
-    char* python_library;
-	char* script_filename;
-	char* class_name;
-	char* constructor_argument;
-
 	fprintf(stderr, "python_library: %s\n", s->python_library); fflush(stderr);
 	fprintf(stderr, "script_filename: %s\n", s->script_filename); fflush(stderr);
 	fprintf(stderr, "class_name: %s\n", s->class_name); fflush(stderr);
 	fprintf(stderr, "constructor_argument: %s\n", s->constructor_argument); fflush(stderr);
 
+	int init_res = init_python_library_and_script(s->python_library, s->script_filename, &s->py_funcs);
+	fprintf(stderr, "init_python_library_and_script returns %d\n", init_res);
+
 	return 0;
 }
+
+static void uninit(AVFilterContext *ctx)
+{
+	PythonContext *s = ctx->priv;
+
+	int uninit_res = uninit_python_library_and_script(&s->py_funcs);
+	fprintf(stderr, "uninit_python_library_and_script returns %d\n", uninit_res);
+}
+
 
 AVFilter ff_vf_python = {
     .name          = "python",
@@ -673,6 +703,7 @@ AVFilter ff_vf_python = {
     .priv_class    = &python_class,
     .query_formats = query_formats,
 	.init          = init,
+	.uninit        = uninit,
     .inputs        = python_inputs,
     .outputs       = python_outputs,
     .flags         = 0/*AVFILTER_FLAG_SLICE_THREADS*/,
