@@ -38,6 +38,7 @@
 struct lib_handle_t;
 typedef struct lib_handle_t {
     void* handle;
+    char* libpath;
     void* (*get_sym)(struct lib_handle_t* self, const char* name);
     void (*close)(struct lib_handle_t* self);
 } lib_handle_t;
@@ -49,6 +50,7 @@ static void* win32_getsym(struct lib_handle_t* self, const char* name) {
 static void win32_closelib(struct lib_handle_t* self) {
     FreeLibrary((HANDLE)self->handle);
     self->handle = NULL;
+    free(self->libpath);
 }
 #endif
 #if defined(__linux__) || defined(WINLIN)
@@ -58,42 +60,57 @@ static void* libdl_getsym(struct lib_handle_t* self, const char* name) {
 static void libdl_closelib(struct lib_handle_t* self) {
     dlclose(self->handle);
     self->handle = NULL;
+    free(self->libpath);
 }
 #endif
 
 static int open_lib(const char* libname, lib_handle_t* out) {
+    char *libpath = strdup(libname);
+    if (libpath == NULL) {
+        return 3;
+    }
     if (!out) return 1;
-#if defined(WINLIN) || defined(_WIN32)
     {
+#if defined(WINLIN) || defined(_WIN32)
         HANDLE hLib = LoadLibraryA(libname);
         if (hLib == NULL) {
 #ifdef WINLIN
             // try dlopen if LoadLibraryA failed
             void* lib = dlopen(libname, RTLD_LAZY);
-            if (lib == NULL) return 2;
+            if (lib == NULL) {
+                free(libpath);
+                return 2;
+            }
             out->handle = lib;
             out->get_sym = libdl_getsym;
             out->close = libdl_closelib;
+            out->libpath = libpath;
             return 0;
 #else
+            free(libpath);
             return 2;
 #endif
         }
         out->handle = (void*)hLib;
         out->get_sym = win32_getsym;
         out->close = win32_closelib;
+        out->libpath = libpath;
         return 0;
-    }
 #elif defined(__linux__)
-    void* lib = dlopen(libname, RTLD_LAZY);
-    if (lib == NULL) return 2;
-    out->handle = lib;
-    out->get_sym = libdl_getsym;
-    out->close = libdl_closelib;
-    return 0;
+        void* lib = dlopen(libname, RTLD_LAZY);
+        if (lib == NULL) {
+            free(libpath);
+            return 2;
+        }
+        out->handle = lib;
+        out->get_sym = libdl_getsym;
+        out->close = libdl_closelib;
+        out->libpath = libpath;
+        return 0;
 #else
 #error Unsupported platform
 #endif
+    }
 }
 
 typedef struct PyObject_ PyObject;
@@ -146,7 +163,7 @@ typedef struct py_embed {
     PyThreadState* tstate;
 } py_embed_t;
 
-static py_embed_t s_py = {NULL};
+static py_embed_t s_py = { NULL };
 
 static int fill_pyembed(lib_handle_t hpylib) {
     if (hpylib.handle == NULL) return 1;
@@ -485,8 +502,10 @@ static int init_python_library_and_script(const char* dllfile, const char* pyfil
             return 3;
         }
     } else {
-        fprintf(stderr, "Python library was already loaded, refusing to load another");
-        fflush(stderr);
+        if (strcmp(dllfile, s_py.hlib.libpath) != 0) {
+            fprintf(stderr, "Python library '%s' already loaded, refusing to load '%s'", s_py.hlib.libpath, dllfile);
+            fflush(stderr);
+        }
     }
     if (update_sys_path(pyfile) != 0) {
         return 4;
