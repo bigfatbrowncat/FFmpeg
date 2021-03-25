@@ -510,6 +510,8 @@ static int uninit_pycontext(PythonContext* ctx) {
 
 
 static int init_python_library_and_script(const char* dllfile, const char* pyfile) {
+    int res;
+
     if (s_py.hlib.handle == NULL) {
         // library wasn't already initialized
         lib_handle_t hlib;
@@ -530,7 +532,10 @@ static int init_python_library_and_script(const char* dllfile, const char* pyfil
             fflush(stderr);
         }
     }
-    if (update_sys_path(pyfile) != 0) {
+    res = update_sys_path(pyfile);
+    if (res != 0) {
+        fprintf(stderr, "sys.path update fail: %d\n", res);
+        fflush(stderr);
         return 4;
     }
 
@@ -659,15 +664,14 @@ static int pythonCallProcess(AVFilterContext *ctx, void *arg, int jobnr, int nb_
     const int slice_end = (height * (jobnr+1)) / nb_jobs;
 
     // Currently only one thread is supported here, so jobnr has to be 0 and nb_jobs should be 1
+    if (s->user_module) {
+        fprintf(stderr, "THREAD!!! %s\n", s->python_library); fflush(stderr);
 
-    fprintf(stderr, "THREAD!!! %s\n", s->python_library); fflush(stderr);
+        int pycall_res = python_call(s->user_module, s->class_name);
+        fprintf(stderr, "python_call returns %d\n", pycall_res); fflush(stderr);
 
-    int pycall_res = python_call(s->user_module, s->class_name);
-	fprintf(stderr, "python_call returns %d\n", pycall_res); fflush(stderr);
-
-	fflush(stdout);	// Flushes the python output
-
-    //pycall("d:\\Anaconda3\\envs\\tensorflow-cl\\python36.dll", "D:\\Projects\\ffmpeg-python-interop\\pyff\\foo.py", "foo");
+        fflush(stdout);	// Flushes the python output
+    }
 
     return 0;
 }
