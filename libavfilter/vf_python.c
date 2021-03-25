@@ -99,6 +99,7 @@ static int open_lib(const char* libname, lib_handle_t* out) {
 typedef struct PyObject_ PyObject;
 typedef struct PyCompilerFlags_ PyCompilerFlags;
 typedef size_t Py_ssize_t;
+typedef struct PyThreadState_ PyThreadState;
 
 typedef struct py_embed {
     lib_handle_t hlib;
@@ -135,10 +136,14 @@ typedef struct py_embed {
     void (*Py_SetPythonHome)(const wchar_t *home);
     void (*PySys_SetPath)(const wchar_t *path);
 
+    PyThreadState* (*PyEval_SaveThread)(void);
+    void (*PyEval_RestoreThread)(PyThreadState *tstate);
+
     // internal data for working with Python
     int file_input; // token for Python compile() telling that this is a module we're Python-compiling
     wchar_t* program_name; // what we set via Py_SetProgramName()
     wchar_t* python_home;
+    PyThreadState* tstate;
 } py_embed_t;
 
 static py_embed_t s_py = {NULL};
@@ -185,6 +190,9 @@ static int fill_pyembed(lib_handle_t hpylib) {
     GET_FUNC(Py_SetPythonHome);
     GET_FUNC(PySys_SetPath);
 
+    GET_FUNC(PyEval_SaveThread);
+    GET_FUNC(PyEval_RestoreThread);
+
 #undef GET_FUNC
     return 0;
 }
@@ -219,6 +227,7 @@ static wchar_t* get_dir_name(wchar_t* file_name) {
 static int init_embed_python(const char* pylib) {
     // set program name so on *nix Python can find its prefix from it
     size_t main_sz;
+    s_py.tstate = NULL;
     s_py.program_name = s_py.Py_DecodeLocale(pylib, &main_sz);
     if (s_py.program_name == NULL) {
         fprintf(stderr, "cannot decode '%s' into wchar_t: %d\n", pylib, (int)main_sz);
@@ -260,53 +269,65 @@ static int init_embed_python(const char* pylib) {
         long file_input;
         if (modSymbol == NULL) {
             s_py.PyErr_Print();
-            return 77;
+            s_py.tstate = s_py.PyEval_SaveThread();
+            return -1;
         }
         pyFileInput = s_py.PyObject_GetAttrString(modSymbol, "file_input");
         s_py.Py_DecRef(modSymbol);
         if (pyFileInput == NULL) {
             s_py.PyErr_Print();
-            return 77;
+            s_py.tstate = s_py.PyEval_SaveThread();
+            return -2;
         }
         file_input = s_py.PyLong_AsLong(pyFileInput);
         s_py.Py_DecRef(pyFileInput);
         if (file_input == -1) {
             s_py.PyErr_Print();
-            return 77;
+            s_py.tstate = s_py.PyEval_SaveThread();
+            return -3;
         }
         s_py.file_input = file_input;
     }
+
+    // release the GIL, per Python control flow
+    s_py.tstate = s_py.PyEval_SaveThread();
 
     return 0;
 }
 
 static int update_sys_path(const char* script_file) {
-    // append path to the script
-    wchar_t* sys_path = s_py.Py_GetPath();
-    wchar_t* uscript_file = s_py.Py_DecodeLocale(script_file, NULL);
-    wchar_t *script_dir, *new_path;
+    s_py.PyEval_RestoreThread(s_py.tstate);
+    {
+        // append path to the script
+        wchar_t* sys_path = s_py.Py_GetPath();
+        wchar_t* uscript_file = s_py.Py_DecodeLocale(script_file, NULL);
+        wchar_t *script_dir, *new_path;
 #if defined(_WIN32) || defined(__CYGWIN__)
-    const wchar_t* path_sep = L";";
+        const wchar_t* path_sep = L";";
 #else
-    const wchar_t* path_sep = L":";
+        const wchar_t* path_sep = L":";
 #endif
-    if (uscript_file == NULL) {
-        return 1;
-    }
-    script_dir = get_dir_name(uscript_file);
-    free(uscript_file);
-    if (script_dir == NULL) {
-        return 2;
-    }
-    new_path = calloc(wcslen(sys_path) + wcslen(path_sep) + wcslen(script_dir) + 1, sizeof(wchar_t));
-    if (new_path == NULL) {
+        if (uscript_file == NULL) {
+            s_py.tstate = s_py.PyEval_SaveThread();
+            return 1;
+        }
+        script_dir = get_dir_name(uscript_file);
+        free(uscript_file);
+        if (script_dir == NULL) {
+            s_py.tstate = s_py.PyEval_SaveThread();
+            return 2;
+        }
+        new_path = calloc(wcslen(sys_path) + wcslen(path_sep) + wcslen(script_dir) + 1, sizeof(wchar_t));
+        if (new_path == NULL) {
+            free(script_dir);
+            s_py.tstate = s_py.PyEval_SaveThread();
+            return 3;
+        }
+        wcscat(wcscat(wcscpy(new_path, sys_path), path_sep), script_dir);
+        s_py.PySys_SetPath(new_path);
         free(script_dir);
-        return 3;
+        free(new_path);
     }
-    wcscat(wcscat(wcscpy(new_path, sys_path), path_sep), script_dir);
-    s_py.PySys_SetPath(new_path);
-    free(script_dir);
-    free(new_path);
 
     {
         // "import site" and run "site.main()" to override weird behaviour of site.py not being imported in some cases
@@ -315,18 +336,21 @@ static int update_sys_path(const char* script_file) {
         PyObject *siteMain, *noArgs, *siteMainRes;
         if (siteModule == NULL) {
             s_py.PyErr_Print();
+            s_py.tstate = s_py.PyEval_SaveThread();
             return -1;
         }
         siteMain = s_py.PyObject_GetAttrString(siteModule, "main");
         s_py.Py_DecRef(siteModule);
         if (siteMain == NULL) {
             s_py.PyErr_Print();
+            s_py.tstate = s_py.PyEval_SaveThread();
             return -2;
         }
         noArgs = s_py.PyTuple_New(0);
         if (noArgs == NULL) {
             s_py.Py_DecRef(siteMain);
             s_py.PyErr_Print();
+            s_py.tstate = s_py.PyEval_SaveThread();
             return -3;
         }
         siteMainRes = s_py.PyObject_CallObject(siteMain, noArgs);
@@ -334,11 +358,13 @@ static int update_sys_path(const char* script_file) {
         s_py.Py_DecRef(noArgs);
         if (siteMainRes == NULL) {
             s_py.PyErr_Print();
+            s_py.tstate = s_py.PyEval_SaveThread();
             return -4;
         }
         s_py.Py_DecRef(siteMainRes);
     }
 
+    s_py.tstate = s_py.PyEval_SaveThread();
     return 0;
 }
 
@@ -399,6 +425,44 @@ static int get_user_module(const char* script_file, PyObject** result) {
     return 0;
 }
 
+typedef struct PythonContext {
+    const AVClass *class;
+
+    char* python_library;
+	char* script_filename;
+	char* class_name;
+	char* constructor_argument;
+
+	PyObject* user_module;
+} PythonContext;
+
+static int init_pycontext(PythonContext* ctx) {
+    int res;
+    s_py.PyEval_RestoreThread(s_py.tstate);
+
+    res = get_user_module(ctx->script_filename, &(ctx->user_module));
+    fprintf(stderr, "get_user_module returns %d\n", res);
+    if (res != 0) {
+        if (res < 0) {
+            s_py.PyErr_Print();
+        }
+        s_py.tstate = s_py.PyEval_SaveThread();
+        return 2;
+    }
+    s_py.tstate = s_py.PyEval_SaveThread();
+
+    return 0;
+}
+
+static int uninit_pycontext(PythonContext* ctx) {
+    s_py.PyEval_RestoreThread(s_py.tstate);
+
+    s_py.Py_DecRef(ctx->user_module);
+
+    s_py.tstate = s_py.PyEval_SaveThread();
+    return 0;
+}
+
 // Interface from python wrapper to the filter
 
 
@@ -429,6 +493,9 @@ static int init_python_library_and_script(const char* dllfile, const char* pyfil
 }
 
 static int uninit_python_library_and_script(void) {
+    if (s_py.tstate != NULL) {
+        s_py.PyEval_RestoreThread(s_py.tstate);
+    }
     s_py.Py_FinalizeEx();
     // TODO Check returning value
 
@@ -487,19 +554,6 @@ static int python_call(PyObject* user_module, const char* func) {
 }
 
 
-
-
-
-typedef struct PythonContext {
-    const AVClass *class;
-
-    char* python_library;
-	char* script_filename;
-	char* class_name;
-	char* constructor_argument;
-
-	PyObject* user_module;
-} PythonContext;
 
 
 #define OFFSET(x) offsetof(PythonContext, x)
@@ -698,12 +752,9 @@ static av_cold int init(AVFilterContext *ctx)
     if (res != 0) {
         return 1;
     }
-    res = get_user_module(s->script_filename, &(s->user_module));
-    fprintf(stderr, "get_user_module returns %d\n", res);
+    res = init_pycontext(s);
+    fprintf(stderr, "init_pycontext returns %d\n", res);
     if (res != 0) {
-        if (res < 0) {
-            s_py.PyErr_Print();
-        }
         return 2;
     }
     fflush(stderr);
@@ -716,7 +767,8 @@ static void uninit(AVFilterContext *ctx)
     int res;
 	PythonContext *s = ctx->priv;
 
-    s_py.Py_DecRef(s->user_module);
+    res = uninit_pycontext(s);
+	fprintf(stderr, "uninit_pycontext returns %d\n", res);
 
 	res = uninit_python_library_and_script();
 	fprintf(stderr, "uninit_python_library_and_script returns %d\n", res);
