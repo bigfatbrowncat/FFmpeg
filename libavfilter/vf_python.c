@@ -576,6 +576,34 @@ static inline ubool _pack_int(const int value, const int pos, PyObject* tup) {
     return 1;
 }
 
+static int python_call_av(PyObject* user_module, const char* func, AVFrame* in, AVFrame* out) {
+    PyObject *py_func = NULL, *args = NULL, *tmpview = NULL, *result = NULL;
+    if ((py_func = s_py.PyObject_GetAttrString(user_module, func)) == NULL) goto error;
+
+    if ((args = s_py.PyTuple_New(2)) == NULL) goto error;
+    if ((tmpview = s_py.PyMemoryView_FromMemory((char*)in, sizeof(AVFrame), PyBUF_READ | PyBUF_WRITE)) == NULL) goto error;
+    if (s_py.PyTuple_SetItem(args, 0, tmpview) != 0) goto error;
+    if ((tmpview = s_py.PyMemoryView_FromMemory((char*)out, sizeof(AVFrame), PyBUF_READ | PyBUF_WRITE)) == NULL) goto error;
+    if (s_py.PyTuple_SetItem(args, 1, tmpview) != 0) goto error;
+    tmpview = NULL; // owned by args
+
+    if ((result = s_py.PyObject_CallObject(py_func, args)) == NULL) goto error;
+
+    s_py.Py_DecRef(args);
+    s_py.Py_DecRef(tmpview);
+    s_py.Py_DecRef(result);
+    s_py.Py_DecRef(py_func);
+    RELEASE_PYGIL();
+    return 0;
+error:
+    s_py.Py_DecRef(args);
+    s_py.Py_DecRef(tmpview);
+    s_py.Py_DecRef(result);
+    s_py.Py_DecRef(py_func);
+    RELEASE_PYGIL();
+    return 1;
+}
+
 static int python_call(PyObject* user_module, const char* func,
         const int format, const int width, const int height,
         const int* src_linesize, const int* dst_linesize,
@@ -607,6 +635,7 @@ static int python_call(PyObject* user_module, const char* func,
     for(i = 0; i < AV_NUM_DATA_POINTERS ; i++) {
         if ((tmp_view = s_py.PyMemoryView_FromMemory(src_data[i], src_linesize[i]*height, PyBUF_READ)) == NULL) goto error;
         if (s_py.PyTuple_SetItem(tmp_tuple, i, tmp_view) != 0) goto error;
+        tmp_view = NULL; // owned by tmp_tuple
     }
     if (s_py.PyTuple_SetItem(args, 5, tmp_tuple) != 0) goto error;
 
@@ -614,8 +643,10 @@ static int python_call(PyObject* user_module, const char* func,
     for(i = 0; i < AV_NUM_DATA_POINTERS ; i++) {
         if ((tmp_view = s_py.PyMemoryView_FromMemory(dst_data[i], dst_linesize[i]*height*4, PyBUF_WRITE)) == NULL) goto error;
         if (s_py.PyTuple_SetItem(tmp_tuple, i, tmp_view) != 0) goto error;
+        tmp_view = NULL; // owned by tmp_tuple
     }
     if (s_py.PyTuple_SetItem(args, 6, tmp_tuple) != 0) goto error;
+    tmp_tuple = NULL; // now owned by args
 
     if ((result = s_py.PyObject_CallObject(py_func, args)) == NULL) goto error;
 
@@ -684,10 +715,10 @@ static int pythonCallProcess(AVFilterContext *ctx, void *arg, int jobnr, int nb_
 
     // Currently only one thread is supported here, so jobnr has to be 0 and nb_jobs should be 1
     if (s->user_module) {
-        // TODO: handle src_linesize != width, etc.
-        int pycall_res = python_call(s->user_module, s->class_name, 
+        /*int pycall_res = python_call(s->user_module, s->class_name, 
             in->format, in->width, in->height,
-            in->linesize, out->linesize, in->data, out->data);
+            in->linesize, out->linesize, in->data, out->data);*/
+        int pycall_res = python_call_av(s->user_module, s->class_name, in, out);
         if (pycall_res != 0) {
             fprintf(stderr, "python_call returns %d\n", pycall_res); fflush(stderr);
         }
