@@ -578,12 +578,13 @@ static inline ubool _pack_int(const int value, const int pos, PyObject* tup) {
 
 static int python_call_av(PyObject* user_module, const char* func, AVFrame* in, AVFrame* out) {
     PyObject *py_func = NULL, *args = NULL, *tmpview = NULL, *result = NULL;
+    ACQUIRE_PYGIL();
     if ((py_func = s_py.PyObject_GetAttrString(user_module, func)) == NULL) goto error;
 
     if ((args = s_py.PyTuple_New(2)) == NULL) goto error;
-    if ((tmpview = s_py.PyMemoryView_FromMemory((char*)in, sizeof(AVFrame), PyBUF_READ | PyBUF_WRITE)) == NULL) goto error;
+    if ((tmpview = s_py.PyMemoryView_FromMemory((char*)in, sizeof(AVFrame), PyBUF_WRITE)) == NULL) goto error;
     if (s_py.PyTuple_SetItem(args, 0, tmpview) != 0) goto error;
-    if ((tmpview = s_py.PyMemoryView_FromMemory((char*)out, sizeof(AVFrame), PyBUF_READ | PyBUF_WRITE)) == NULL) goto error;
+    if ((tmpview = s_py.PyMemoryView_FromMemory((char*)out, sizeof(AVFrame), PyBUF_WRITE)) == NULL) goto error;
     if (s_py.PyTuple_SetItem(args, 1, tmpview) != 0) goto error;
     tmpview = NULL; // owned by args
 
@@ -596,6 +597,7 @@ static int python_call_av(PyObject* user_module, const char* func, AVFrame* in, 
     RELEASE_PYGIL();
     return 0;
 error:
+    s_py.PyErr_Print();
     s_py.Py_DecRef(args);
     s_py.Py_DecRef(tmpview);
     s_py.Py_DecRef(result);
