@@ -16,10 +16,13 @@ from ctypes import (
 AV_NUM_DATA_POINTERS = 8
 
 # see macro usage in frame.h
-# TODO: import them from some runtime-generated module?
-FF_API_PKT_PTS = True
-FF_API_ERROR_FRAME = True
-FF_API_FRAME_QP = True
+# TODO: import libavutil major version from some runtime-generated module?
+LIBAVUTIL_VERSION_MAJOR = 56
+
+# taken from version.h
+FF_API_PKT_PTS = LIBAVUTIL_VERSION_MAJOR < 57
+FF_API_ERROR_FRAME = LIBAVUTIL_VERSION_MAJOR < 57
+FF_API_FRAME_QP = LIBAVUTIL_VERSION_MAJOR < 57
 
 
 class AVRational(ctypes.Structure):
