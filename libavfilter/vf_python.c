@@ -723,6 +723,7 @@ static int pythonCallProcess(AVFilterContext *ctx, void *arg, int jobnr, int nb_
         int pycall_res = python_call_av(s->user_module, s->class_name, in, out);
         if (pycall_res != 0) {
             fprintf(stderr, "python_call returns %d\n", pycall_res); fflush(stderr);
+            return AVERROR(pycall_res);
         }
 
         fflush(stdout);	// Flushes the python output
@@ -809,6 +810,7 @@ static int config_output(AVFilterLink *outlink)
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 {
+    int res;
     AVFilterContext *ctx = inlink->dst;
     AVFilterLink *outlink = ctx->outputs[0];
     ThreadData td;
@@ -823,12 +825,9 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 
     td.in = in, td.out = out;
     //fprintf(stderr, "HERE2\n"); fflush(stderr);
-    ctx->internal->execute(ctx, pythonCallProcess, &td, NULL, 1/*FFMIN(in->height, ff_filter_get_nb_threads(ctx))*/);
-
-
-
+    res = ctx->internal->execute(ctx, pythonCallProcess, &td, NULL, 1/*FFMIN(in->height, ff_filter_get_nb_threads(ctx))*/);
     av_frame_free(&in);
-    return ff_filter_frame(outlink, out);
+    return res == 0 ? ff_filter_frame(outlink, out) : res;
 }
 
 static const AVFilterPad python_inputs[] = {
@@ -863,12 +862,12 @@ static av_cold int init(AVFilterContext *ctx)
     res = init_python_library_and_script(s->python_library, s->script_filename);
     fprintf(stderr, "init_python_library_and_script returns %d\n", res);
     if (res != 0) {
-        return 1;
+        return AVERROR(1);
     }
     res = init_pycontext(s);
     fprintf(stderr, "init_pycontext returns %d\n", res);
     if (res != 0) {
-        return 2;
+        return AVERROR(2);
     }
     fflush(stderr);
 
