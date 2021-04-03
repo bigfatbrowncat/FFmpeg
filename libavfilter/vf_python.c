@@ -189,6 +189,7 @@ typedef struct py_embed {
     void* (*PyMem_RawMalloc)(size_t n);
     void* (*PyMem_RawCalloc)(size_t nelem, size_t elsize);
     PyObject* (*PyMemoryView_FromMemory)(char *mem, Py_ssize_t size, int flags);
+    int (*PySys_SetObject)(const char *name, PyObject *v);
 
     // internal data for working with Python
     int file_input; // token for Python compile() telling that this is a module we're Python-compiling
@@ -208,7 +209,7 @@ static int fill_pyembed(lib_handle_t hpylib) {
 
 #define GET_FUNC(name)                          \
     s_py.name = hpylib.get_sym(&hpylib, #name); \
-    if (s_py.name == NULL) return 3;
+    if (s_py.name == NULL) return 4;
 
     GET_FUNC(Py_Initialize);
     GET_FUNC(Py_FinalizeEx);
@@ -248,6 +249,7 @@ static int fill_pyembed(lib_handle_t hpylib) {
     GET_FUNC(PyMem_RawMalloc);
     GET_FUNC(PyMem_RawCalloc);
     GET_FUNC(PyMemoryView_FromMemory);
+    GET_FUNC(PySys_SetObject);
 
 #undef GET_FUNC
     return 0;
@@ -368,6 +370,23 @@ static int init_embed_python(const char* pylib) {
             return 1003;
         }
         s_py.file_input = file_input;
+    }
+
+    {
+        // set sys.LIBAVUTIL_VERSION_MAJOR
+        PyObject* libav_version = s_py.PyLong_FromLongLong(LIBAVUTIL_VERSION_MAJOR);
+        if (libav_version == NULL) {
+            s_py.PyErr_Print();
+            RELEASE_PYGIL();
+            return 1004;
+        }
+        if (s_py.PySys_SetObject("LIBAVUTIL_VERSION_MAJOR", libav_version) != 0) {
+            s_py.PyErr_Print();
+            s_py.Py_DecRef(libav_version);
+            RELEASE_PYGIL();
+            return 1005;
+        }
+        s_py.Py_DecRef(libav_version);
     }
 
     // release the GIL, per Python control flow

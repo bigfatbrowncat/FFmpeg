@@ -1,3 +1,8 @@
+try:
+    from sys import LIBAVUTIL_VERSION_MAJOR
+except ImportError:
+    raise ImportError("Please use ffmpeg_api from ffmpeg python filter")
+
 import numpy as np
 import numpy.ctypeslib as np_ctypes
 
@@ -16,9 +21,6 @@ from ctypes import (
 AV_NUM_DATA_POINTERS = 8
 
 # see macro usage in frame.h
-# TODO: import libavutil major version from some runtime-generated module?
-LIBAVUTIL_VERSION_MAJOR = 56
-
 # taken from version.h
 FF_API_PKT_PTS = LIBAVUTIL_VERSION_MAJOR < 57
 FF_API_ERROR_FRAME = LIBAVUTIL_VERSION_MAJOR < 57
