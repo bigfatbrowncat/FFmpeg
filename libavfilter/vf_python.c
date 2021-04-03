@@ -506,6 +506,31 @@ static int get_user_module(const char* script_file, PyObject** result) {
     return 0;
 }
 
+static int init_pyfilter_class(PyObject* user_module, const char* cls_name, const char* arg, PyObject** result) {
+    PyObject *tuple = NULL, *pyArg = NULL, *cls_type = NULL, *tmp;
+
+    if ((cls_type = s_py.PyObject_GetAttrString(user_module, cls_name)) == NULL) goto error;
+
+    if ((tuple = s_py.PyTuple_New(1)) == NULL) goto error;
+    if ((pyArg = s_py.PyUnicode_DecodeFSDefault(arg)) == NULL) goto error;
+    if (s_py.PyTuple_SetItem(tuple, 0, pyArg) != 0) goto error;
+    pyArg = NULL; // now owned by `tuple`
+
+    if ((tmp = s_py.PyObject_CallObject(cls_type, tuple)) == NULL) goto error;
+    *result = tmp;
+
+    s_py.Py_DecRef(tuple);
+    s_py.Py_DecRef(pyArg);
+    s_py.Py_DecRef(cls_type);
+    return 0;
+error:
+    s_py.PyErr_Print();
+    s_py.Py_DecRef(tuple);
+    s_py.Py_DecRef(pyArg);
+    s_py.Py_DecRef(cls_type);
+    return 1;
+}
+
 typedef struct PythonContext {
     const AVClass *class;
 
@@ -515,6 +540,7 @@ typedef struct PythonContext {
 	char* constructor_argument;
 
 	PyObject* user_module;
+    PyObject* filter_instance;
 } PythonContext;
 
 static int init_pycontext(PythonContext* ctx) {
@@ -524,20 +550,27 @@ static int init_pycontext(PythonContext* ctx) {
     res = get_user_module(ctx->script_filename, &(ctx->user_module));
     fprintf(stderr, "get_user_module returns %d\n", res);
     if (res != 0) {
-        if (res < 0) {
+        if (res > 1000) {
             s_py.PyErr_Print();
         }
         RELEASE_PYGIL();
         return 2;
     }
-    RELEASE_PYGIL();
 
+    res = init_pyfilter_class(ctx->user_module, ctx->class_name, ctx->constructor_argument, &(ctx->filter_instance));
+    if (res != 0) {
+        RELEASE_PYGIL();
+        return 3;
+    }
+
+    RELEASE_PYGIL();
     return 0;
 }
 
 static int uninit_pycontext(PythonContext* ctx) {
     ACQUIRE_PYGIL();
 
+    s_py.Py_DecRef(ctx->filter_instance);
     s_py.Py_DecRef(ctx->user_module);
 
     RELEASE_PYGIL();
@@ -612,10 +645,9 @@ static inline ubool _pack_int(const int value, const int pos, PyObject* tup) {
     return 1;
 }
 
-static int python_call_av(PyObject* user_module, const char* func, AVFrame* in, AVFrame* out) {
-    PyObject *py_func = NULL, *args = NULL, *tmpview = NULL, *result = NULL;
+static int python_call_filter(PyObject* filter_instance, AVFrame* in, AVFrame* out) {
+    PyObject *args = NULL, *tmpview = NULL, *result = NULL;
     ACQUIRE_PYGIL();
-    if ((py_func = s_py.PyObject_GetAttrString(user_module, func)) == NULL) goto error;
 
     if ((args = s_py.PyTuple_New(2)) == NULL) goto error;
     if ((tmpview = s_py.PyMemoryView_FromMemory((char*)in, sizeof(AVFrame), PyBUF_WRITE)) == NULL) goto error;
@@ -624,84 +656,17 @@ static int python_call_av(PyObject* user_module, const char* func, AVFrame* in, 
     if (s_py.PyTuple_SetItem(args, 1, tmpview) != 0) goto error;
     tmpview = NULL; // owned by args
 
-    if ((result = s_py.PyObject_CallObject(py_func, args)) == NULL) goto error;
+    if ((result = s_py.PyObject_CallObject(filter_instance, args)) == NULL) goto error;
 
     s_py.Py_DecRef(args);
     s_py.Py_DecRef(tmpview);
     s_py.Py_DecRef(result);
-    s_py.Py_DecRef(py_func);
     RELEASE_PYGIL();
     return 0;
 error:
     s_py.PyErr_Print();
     s_py.Py_DecRef(args);
     s_py.Py_DecRef(tmpview);
-    s_py.Py_DecRef(result);
-    s_py.Py_DecRef(py_func);
-    RELEASE_PYGIL();
-    return 1;
-}
-
-static int python_call(PyObject* user_module, const char* func,
-        const int format, const int width, const int height,
-        const int* src_linesize, const int* dst_linesize,
-        uint8_t** src_data, uint8_t** dst_data) {
-
-    PyObject *py_func = NULL, *args = NULL, *tmp_tuple = NULL, *tmp_view = NULL, *result = NULL;
-    int i;
-    ACQUIRE_PYGIL();
-
-    if ((py_func = s_py.PyObject_GetAttrString(user_module, func)) == NULL) goto error;
-    if ((args = s_py.PyTuple_New(7)) == NULL) goto error;
-    if (!_pack_int(format, 0, args)) goto error;
-    if (!_pack_int(width, 1, args)) goto error;
-    if (!_pack_int(height, 2, args)) goto error;
-
-    if ((tmp_tuple = s_py.PyTuple_New(AV_NUM_DATA_POINTERS )) == NULL) goto error;
-    for(i = 0; i < AV_NUM_DATA_POINTERS ; i++) {
-        if (!_pack_int(src_linesize[i], i, tmp_tuple)) goto error;
-    }
-    if (s_py.PyTuple_SetItem(args, 3, tmp_tuple) != 0) goto error;
-
-    if ((tmp_tuple = s_py.PyTuple_New(AV_NUM_DATA_POINTERS )) == NULL) goto error;
-    for(i = 0; i < AV_NUM_DATA_POINTERS ; i++) {
-        if (!_pack_int(dst_linesize[i], i, tmp_tuple)) goto error;
-    }
-    if (s_py.PyTuple_SetItem(args, 4, tmp_tuple) != 0) goto error;
-
-    if ((tmp_tuple = s_py.PyTuple_New(AV_NUM_DATA_POINTERS )) == NULL) goto error;
-    for(i = 0; i < AV_NUM_DATA_POINTERS ; i++) {
-        if ((tmp_view = s_py.PyMemoryView_FromMemory(src_data[i], src_linesize[i]*height, PyBUF_READ)) == NULL) goto error;
-        if (s_py.PyTuple_SetItem(tmp_tuple, i, tmp_view) != 0) goto error;
-        tmp_view = NULL; // owned by tmp_tuple
-    }
-    if (s_py.PyTuple_SetItem(args, 5, tmp_tuple) != 0) goto error;
-
-    if ((tmp_tuple = s_py.PyTuple_New(AV_NUM_DATA_POINTERS )) == NULL) goto error;
-    for(i = 0; i < AV_NUM_DATA_POINTERS ; i++) {
-        if ((tmp_view = s_py.PyMemoryView_FromMemory(dst_data[i], dst_linesize[i]*height*4, PyBUF_WRITE)) == NULL) goto error;
-        if (s_py.PyTuple_SetItem(tmp_tuple, i, tmp_view) != 0) goto error;
-        tmp_view = NULL; // owned by tmp_tuple
-    }
-    if (s_py.PyTuple_SetItem(args, 6, tmp_tuple) != 0) goto error;
-    tmp_tuple = NULL; // now owned by args
-
-    if ((result = s_py.PyObject_CallObject(py_func, args)) == NULL) goto error;
-
-    s_py.Py_DecRef(py_func);
-    s_py.Py_DecRef(args);
-    s_py.Py_DecRef(tmp_tuple);
-    s_py.Py_DecRef(tmp_view);
-    s_py.Py_DecRef(result);
-    RELEASE_PYGIL();
-
-    return 0;
-error:
-    s_py.PyErr_Print();
-    s_py.Py_DecRef(py_func);
-    s_py.Py_DecRef(args);
-    s_py.Py_DecRef(tmp_tuple);
-    s_py.Py_DecRef(tmp_view);
     s_py.Py_DecRef(result);
     RELEASE_PYGIL();
     return 1;
@@ -732,11 +697,6 @@ AVFILTER_DEFINE_CLASS(python);
 
 
 
-
-
-
-
-
 typedef struct ThreadData {
     AVFrame *in, *out;
 } ThreadData;
@@ -756,7 +716,8 @@ static int pythonCallProcess(AVFilterContext *ctx, void *arg, int jobnr, int nb_
         /*int pycall_res = python_call(s->user_module, s->class_name, 
             in->format, in->width, in->height,
             in->linesize, out->linesize, in->data, out->data);*/
-        int pycall_res = python_call_av(s->user_module, s->class_name, in, out);
+        //int pycall_res = python_call_av(s->user_module, s->class_name, in, out);
+        int pycall_res = python_call_filter(s->filter_instance, in, out);
         if (pycall_res != 0) {
             fprintf(stderr, "python_call returns %d\n", pycall_res); fflush(stderr);
             return AVERROR(pycall_res);

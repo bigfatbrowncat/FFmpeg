@@ -110,3 +110,16 @@ class AVFrame(ctypes.Structure):
     def get_data(self, idx, shape=None):
         # TODO: add caching?
         return np_ctypes.as_array(self._data[idx], shape=shape)
+
+
+def unpack_frames(func):
+    def transform(x):
+        return AVFrame.from_buffer(x) if isinstance(x, memoryview) else x
+
+    def wrapped(*args, **kw):
+        nargs = tuple(transform(arg) for arg in args)
+        nkw = {k: transform(v) for k, v in kw.items()}
+
+        return func(*nargs, **nkw)
+
+    return wrapped
