@@ -190,12 +190,15 @@ typedef struct py_embed {
     void* (*PyMem_RawCalloc)(size_t nelem, size_t elsize);
     PyObject* (*PyMemoryView_FromMemory)(char *mem, Py_ssize_t size, int flags);
     int (*PySys_SetObject)(const char *name, PyObject *v);
+    PyObject* (*PyErr_Occurred)(void);
+    int (*PyErr_GivenExceptionMatches)(PyObject *given, PyObject *exc);
 
     // internal data for working with Python
     int file_input; // token for Python compile() telling that this is a module we're Python-compiling
     wchar_t* program_name; // what we set via Py_SetProgramName()
     wchar_t* python_home;
     PyThreadState* tstate;
+    PyObject** PyExc_KeyboardInterrupt;
 } py_embed_t;
 
 static py_embed_t s_py = { NULL };
@@ -207,51 +210,55 @@ static int fill_pyembed(lib_handle_t hpylib) {
     if ((s_py.ffmpeg_exe = get_ffmpeg_exe()) == NULL) return 3;
     s_py.hlib = hpylib;
 
-#define GET_FUNC(name)                          \
+#define GET_SYMBOL(name)                        \
     s_py.name = hpylib.get_sym(&hpylib, #name); \
     if (s_py.name == NULL) return 4;
 
-    GET_FUNC(Py_Initialize);
-    GET_FUNC(Py_FinalizeEx);
-    GET_FUNC(Py_CompileStringObject);
+    GET_SYMBOL(Py_Initialize);
+    GET_SYMBOL(Py_FinalizeEx);
+    GET_SYMBOL(Py_CompileStringObject);
 
-    GET_FUNC(PyUnicode_DecodeFSDefault);
-    GET_FUNC(PyEval_EvalCode);
-    GET_FUNC(PyDict_New);
-    GET_FUNC(PyDict_GetItemString);
-    GET_FUNC(PyTuple_New);
-    GET_FUNC(PyTuple_SetItem);
-    GET_FUNC(PyLong_FromLongLong);
-    GET_FUNC(PyObject_CallObject);
-    GET_FUNC(Py_DecRef);
-    GET_FUNC(PyImport_ImportModule);
-    GET_FUNC(PyObject_GetAttrString);
-    GET_FUNC(PyLong_AsLong);
-    GET_FUNC(PyErr_Print);
-    GET_FUNC(PyDict_Copy);
-    GET_FUNC(PyEval_GetBuiltins);
-    GET_FUNC(PyImport_ExecCodeModuleEx);
+    GET_SYMBOL(PyUnicode_DecodeFSDefault);
+    GET_SYMBOL(PyEval_EvalCode);
+    GET_SYMBOL(PyDict_New);
+    GET_SYMBOL(PyDict_GetItemString);
+    GET_SYMBOL(PyTuple_New);
+    GET_SYMBOL(PyTuple_SetItem);
+    GET_SYMBOL(PyLong_FromLongLong);
+    GET_SYMBOL(PyObject_CallObject);
+    GET_SYMBOL(Py_DecRef);
+    GET_SYMBOL(PyImport_ImportModule);
+    GET_SYMBOL(PyObject_GetAttrString);
+    GET_SYMBOL(PyLong_AsLong);
+    GET_SYMBOL(PyErr_Print);
+    GET_SYMBOL(PyDict_Copy);
+    GET_SYMBOL(PyEval_GetBuiltins);
+    GET_SYMBOL(PyImport_ExecCodeModuleEx);
 
-    GET_FUNC(Py_GetPath);
-    GET_FUNC(Py_EncodeLocale);
-    GET_FUNC(Py_GetPythonHome);
-    GET_FUNC(Py_GetProgramName);
-    GET_FUNC(Py_SetProgramName);
-    GET_FUNC(Py_DecodeLocale);
-    GET_FUNC(Py_GetExecPrefix);
-    GET_FUNC(Py_SetPath);
-    GET_FUNC(Py_SetPythonHome);
-    GET_FUNC(PySys_SetPath);
+    GET_SYMBOL(Py_GetPath);
+    GET_SYMBOL(Py_EncodeLocale);
+    GET_SYMBOL(Py_GetPythonHome);
+    GET_SYMBOL(Py_GetProgramName);
+    GET_SYMBOL(Py_SetProgramName);
+    GET_SYMBOL(Py_DecodeLocale);
+    GET_SYMBOL(Py_GetExecPrefix);
+    GET_SYMBOL(Py_SetPath);
+    GET_SYMBOL(Py_SetPythonHome);
+    GET_SYMBOL(PySys_SetPath);
 
-    GET_FUNC(PyEval_SaveThread);
-    GET_FUNC(PyEval_RestoreThread);
-    GET_FUNC(PyMem_RawFree);
-    GET_FUNC(PyMem_RawMalloc);
-    GET_FUNC(PyMem_RawCalloc);
-    GET_FUNC(PyMemoryView_FromMemory);
-    GET_FUNC(PySys_SetObject);
+    GET_SYMBOL(PyEval_SaveThread);
+    GET_SYMBOL(PyEval_RestoreThread);
+    GET_SYMBOL(PyMem_RawFree);
+    GET_SYMBOL(PyMem_RawMalloc);
+    GET_SYMBOL(PyMem_RawCalloc);
+    GET_SYMBOL(PyMemoryView_FromMemory);
+    GET_SYMBOL(PySys_SetObject);
+    GET_SYMBOL(PyErr_Occurred);
+    GET_SYMBOL(PyErr_GivenExceptionMatches);
 
-#undef GET_FUNC
+    GET_SYMBOL(PyExc_KeyboardInterrupt);
+
+#undef GET_SYMBOL
     return 0;
 }
 
@@ -666,6 +673,7 @@ static inline ubool _pack_int(const int value, const int pos, PyObject* tup) {
 
 static int python_call_filter(PyObject* filter_instance, AVFrame* in, AVFrame* out) {
     PyObject *args = NULL, *tmpview = NULL, *result = NULL;
+    int retval = 0;
     ACQUIRE_PYGIL();
 
     if ((args = s_py.PyTuple_New(2)) == NULL) goto error;
@@ -677,18 +685,23 @@ static int python_call_filter(PyObject* filter_instance, AVFrame* in, AVFrame* o
 
     if ((result = s_py.PyObject_CallObject(filter_instance, args)) == NULL) goto error;
 
+finish:
     s_py.Py_DecRef(args);
     s_py.Py_DecRef(tmpview);
     s_py.Py_DecRef(result);
     RELEASE_PYGIL();
-    return 0;
+    return retval;
 error:
-    s_py.PyErr_Print();
-    s_py.Py_DecRef(args);
-    s_py.Py_DecRef(tmpview);
-    s_py.Py_DecRef(result);
-    RELEASE_PYGIL();
-    return 1;
+    {
+        PyObject* exc = s_py.PyErr_Occurred();
+        if (exc != NULL && s_py.PyErr_GivenExceptionMatches(exc, *s_py.PyExc_KeyboardInterrupt)) {
+            retval = AVERROR_EXIT;
+        } else {
+            retval = 1;
+            s_py.PyErr_Print();
+        }
+    }
+    goto finish;
 }
 
 
@@ -737,10 +750,14 @@ static int pythonCallProcess(AVFilterContext *ctx, void *arg, int jobnr, int nb_
             in->linesize, out->linesize, in->data, out->data);*/
         //int pycall_res = python_call_av(s->user_module, s->class_name, in, out);
         int pycall_res = python_call_filter(s->filter_instance, in, out);
-        if (pycall_res != 0) {
-            fprintf(stderr, "python_call returns %d\n", pycall_res); fflush(stderr);
-            // TODO: if Ctrl-C return AVERROR_EXIT
-            return AVERROR_EXTERNAL;
+        switch (pycall_res) {
+            case 0: break;
+            case AVERROR_EXIT:
+                return pycall_res;
+            default:
+                fprintf(stderr, "python_call returns %d\n", pycall_res);
+                fflush(stderr);
+                return AVERROR_EXTERNAL;
         }
 
         fflush(stdout);	// Flushes the python output
