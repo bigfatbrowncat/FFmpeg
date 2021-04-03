@@ -739,7 +739,8 @@ static int pythonCallProcess(AVFilterContext *ctx, void *arg, int jobnr, int nb_
         int pycall_res = python_call_filter(s->filter_instance, in, out);
         if (pycall_res != 0) {
             fprintf(stderr, "python_call returns %d\n", pycall_res); fflush(stderr);
-            return AVERROR(pycall_res);
+            // TODO: if Ctrl-C return AVERROR_EXIT
+            return AVERROR_EXTERNAL;
         }
 
         fflush(stdout);	// Flushes the python output
@@ -841,7 +842,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 
     td.in = in, td.out = out;
     //fprintf(stderr, "HERE2\n"); fflush(stderr);
-    res = ctx->internal->execute(ctx, pythonCallProcess, &td, NULL, 1/*FFMIN(in->height, ff_filter_get_nb_threads(ctx))*/);
+    res = pythonCallProcess(ctx, &td, 1, 1);
     av_frame_free(&in);
     return res == 0 ? ff_filter_frame(outlink, out) : res;
 }
@@ -878,12 +879,12 @@ static av_cold int init(AVFilterContext *ctx)
     res = init_python_library_and_script(s->python_library, s->script_filename);
     fprintf(stderr, "init_python_library_and_script returns %d\n", res);
     if (res != 0) {
-        return AVERROR(1);
+        return AVERROR(EIO);
     }
     res = init_pycontext(s);
     fprintf(stderr, "init_pycontext returns %d\n", res);
     if (res != 0) {
-        return AVERROR(2);
+        return AVERROR_EXTERNAL;
     }
     fflush(stderr);
 
