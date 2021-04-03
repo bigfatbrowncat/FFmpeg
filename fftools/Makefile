@@ -6,7 +6,7 @@ AVPROGS     := $(AVPROGS-yes:%=%$(PROGSSUF)$(EXESUF))
 PROGS       += $(AVPROGS)
 
 AVBASENAMES  = ffmpeg ffplay ffprobe
-ALLAVPROGS   = $(AVBASENAMES:%=%$(PROGSSUF)$(EXESUF))
+ALLAVPROGS   = $(AVBASENAMES:%=%$(PROGSSUF)$(EXESUF)) ffmpeg_api.py
 ALLAVPROGS_G = $(AVBASENAMES:%=%$(PROGSSUF)_g$(EXESUF))
 
 OBJS-ffmpeg                        += fftools/ffmpeg_opt.o fftools/ffmpeg_filter.o fftools/ffmpeg_hw.o
@@ -42,7 +42,7 @@ install-progs-$(CONFIG_SHARED): install-libs
 
 install-progs: install-progs-yes $(AVPROGS)
 	$(Q)mkdir -p "$(BINDIR)"
-	$(INSTALL) -c -m 755 $(AVPROGS) "$(BINDIR)"
+	$(INSTALL) -c -m 755 $(AVPROGS) ffmpeg_api.py "$(BINDIR)"
 
 uninstall: uninstall-progs
 
