@@ -7,12 +7,19 @@
  * Python filter
  */
 
-#if defined(_WIN32)
+#if defined(__CYGWIN__) || defined(__MINGW32__)
+#define WINLIN
+#endif
+
+#if defined(_WIN32) || defined(WINLIN)
 #include <windows.h>
 #include <string.h>
-#elif defined(__CYGWIN__) || defined(__linux__)
+#endif
+
+#if defined(__CYGWIN__) || defined(__linux__)
 #include <dlfcn.h>
-#else
+#include <unistd.h>
+#elif !defined(_WIN32) && !defined(WINLIN)
 #error Unsupported platform
 #endif
 
@@ -30,10 +37,6 @@
 #include <stdlib.h>
 
 #include <compat/w32dlfcn.h>
-
-#if defined(__CYGWIN__) || defined(__MINGW32__)
-#define WINLIN
-#endif
 
 struct lib_handle_t;
 typedef struct lib_handle_t {
@@ -113,6 +116,32 @@ static int open_lib(const char* libname, lib_handle_t* out) {
     }
 }
 
+static char* get_ffmpeg_exe(void) {
+#if defined(_WIN32) || defined(WINLIN)
+    char buf[MAX_PATH + 1];
+    memset(buf, 0, sizeof(buf));
+    if ((GetModuleFileNameA(NULL, buf, sizeof(buf) - 1) > 0) && GetLastError() == ERROR_SUCCESS) {
+        return strdup(buf);
+    }
+    return NULL;
+#elif defined(__linux__)
+    struct stat st;
+    char *buf;
+    if (lstat("/proc/self/exe", &st) != 0) {
+        return NULL;
+    }
+    buf = calloc(st.st_size + 1, sizeof(char));
+    if (buf == NULL) {
+        return NULL;
+    }
+    if (readlink("/proc/self/exe", buf, st.st_size) != st.st_size) {
+        free(buf);
+        return NULL;
+    }
+    return buf;
+#endif
+}
+
 typedef struct PyObject_ PyObject;
 typedef struct PyCompilerFlags_ PyCompilerFlags;
 typedef size_t Py_ssize_t;
@@ -120,6 +149,7 @@ typedef struct PyThreadState_ PyThreadState;
 
 typedef struct py_embed {
     lib_handle_t hlib;
+    char* ffmpeg_exe;
 
     // Python C API loaded dynamically
     void (*Py_Initialize)(void);
@@ -173,6 +203,7 @@ static int fill_pyembed(lib_handle_t hpylib) {
     if (hpylib.handle == NULL) return 1;
     if (s_py.hlib.handle != NULL) return 2;
     memset(&s_py, 0, sizeof(s_py));
+    if ((s_py.ffmpeg_exe = get_ffmpeg_exe()) == NULL) return 3;
     s_py.hlib = hpylib;
 
 #define GET_FUNC(name)                          \
@@ -320,21 +351,21 @@ static int init_embed_python(const char* pylib) {
         if (modSymbol == NULL) {
             s_py.PyErr_Print();
             RELEASE_PYGIL();
-            return -1;
+            return 1001;
         }
         pyFileInput = s_py.PyObject_GetAttrString(modSymbol, "file_input");
         s_py.Py_DecRef(modSymbol);
         if (pyFileInput == NULL) {
             s_py.PyErr_Print();
             RELEASE_PYGIL();
-            return -2;
+            return 1002;
         }
         file_input = s_py.PyLong_AsLong(pyFileInput);
         s_py.Py_DecRef(pyFileInput);
         if (file_input == -1) {
             s_py.PyErr_Print();
             RELEASE_PYGIL();
-            return -3;
+            return 1003;
         }
         s_py.file_input = file_input;
     }
@@ -387,21 +418,21 @@ static int update_sys_path(const char* script_file) {
         if (siteModule == NULL) {
             s_py.PyErr_Print();
             RELEASE_PYGIL();
-            return -1;
+            return 1001;
         }
         siteMain = s_py.PyObject_GetAttrString(siteModule, "main");
         s_py.Py_DecRef(siteModule);
         if (siteMain == NULL) {
             s_py.PyErr_Print();
             RELEASE_PYGIL();
-            return -2;
+            return 1002;
         }
         noArgs = s_py.PyTuple_New(0);
         if (noArgs == NULL) {
             s_py.Py_DecRef(siteMain);
             s_py.PyErr_Print();
             RELEASE_PYGIL();
-            return -3;
+            return 1003;
         }
         siteMainRes = s_py.PyObject_CallObject(siteMain, noArgs);
         s_py.Py_DecRef(siteMain);
@@ -409,7 +440,7 @@ static int update_sys_path(const char* script_file) {
         if (siteMainRes == NULL) {
             s_py.PyErr_Print();
             RELEASE_PYGIL();
-            return -4;
+            return 1004;
         }
         s_py.Py_DecRef(siteMainRes);
     }
@@ -456,18 +487,18 @@ static int get_user_module(const char* script_file, PyObject** result) {
         PyObject *code, *res;
         PyObject* pName = s_py.PyUnicode_DecodeFSDefault(script_file);
         if (pName == NULL) {
-            return -1;
+            return 1001;
         }
 
         code = s_py.Py_CompileStringObject(buf, pName, s_py.file_input, NULL, 1);
         s_py.Py_DecRef(pName);
         if (code == NULL) {
-            return -2;
+            return 1002;
         }
         res = s_py.PyImport_ExecCodeModuleEx("__main__", code, script_file);
         s_py.Py_DecRef(code);
         if (res == NULL) {
-            return -3;
+            return 1003;
         }
 
         *result = res;
@@ -533,6 +564,10 @@ static int init_python_library_and_script(const char* dllfile, const char* pyfil
         if (init_embed_python(dllfile) != 0) {
             return 3;
         }
+
+        if (update_sys_path(s_py.ffmpeg_exe) != 0) {
+            return 4;
+        }
     } else {
         if (strcmp(dllfile, s_py.hlib.libpath) != 0) {
             fprintf(stderr, "Python library '%s' already loaded, refusing to load '%s'", s_py.hlib.libpath, dllfile);
@@ -543,7 +578,7 @@ static int init_python_library_and_script(const char* dllfile, const char* pyfil
     if (res != 0) {
         fprintf(stderr, "sys.path update fail: %d\n", res);
         fflush(stderr);
-        return 4;
+        return 5;
     }
 
     return 0;
@@ -559,6 +594,7 @@ static int uninit_python_library_and_script(void) {
     s_py.PyMem_RawFree(s_py.program_name);
     s_py.PyMem_RawFree(s_py.python_home);
     s_py.hlib.close(&s_py.hlib);
+    free(s_py.ffmpeg_exe);
     // TODO Check error??
 
     return 0;
@@ -750,7 +786,7 @@ static int query_formats(AVFilterContext *ctx)
 
 static int config_input(AVFilterLink *inlink)
 {
-    PythonContext *s = inlink->dst->priv;
+    //PythonContext *s = inlink->dst->priv;
 
     // TODO Here we should call a function that takes (w_in, h_in) and returns (w_out, h_out)
 
