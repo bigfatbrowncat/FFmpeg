@@ -193,12 +193,17 @@ typedef struct py_embed {
     PyObject* (*PyErr_Occurred)(void);
     int (*PyErr_GivenExceptionMatches)(PyObject *given, PyObject *exc);
 
+    int (*PySequence_Check)(PyObject *o);
+    Py_ssize_t (*PySequence_Length)(PyObject *o);
+    PyObject* (*PySequence_GetItem)(PyObject *o, Py_ssize_t i);
+
     // internal data for working with Python
     int file_input; // token for Python compile() telling that this is a module we're Python-compiling
     wchar_t* program_name; // what we set via Py_SetProgramName()
     wchar_t* python_home;
     PyThreadState* tstate;
     PyObject** PyExc_KeyboardInterrupt;
+    PyObject** PyExc_AttributeError;
 } py_embed_t;
 
 static py_embed_t s_py = { NULL };
@@ -256,7 +261,12 @@ static int fill_pyembed(lib_handle_t hpylib) {
     GET_SYMBOL(PyErr_Occurred);
     GET_SYMBOL(PyErr_GivenExceptionMatches);
 
+    GET_SYMBOL(PySequence_Check);
+    GET_SYMBOL(PySequence_Length);
+    GET_SYMBOL(PySequence_GetItem);
+
     GET_SYMBOL(PyExc_KeyboardInterrupt);
+    GET_SYMBOL(PyExc_AttributeError);
 
 #undef GET_SYMBOL
     return 0;
@@ -379,22 +389,27 @@ static int init_embed_python(const char* pylib) {
         s_py.file_input = file_input;
     }
 
-    {
-        // set sys.LIBAVUTIL_VERSION_MAJOR
-        PyObject* libav_version = s_py.PyLong_FromLongLong(LIBAVUTIL_VERSION_MAJOR);
-        if (libav_version == NULL) {
-            s_py.PyErr_Print();
-            RELEASE_PYGIL();
-            return 1004;
-        }
-        if (s_py.PySys_SetObject("LIBAVUTIL_VERSION_MAJOR", libav_version) != 0) {
-            s_py.PyErr_Print();
-            s_py.Py_DecRef(libav_version);
-            RELEASE_PYGIL();
-            return 1005;
-        }
-        s_py.Py_DecRef(libav_version);
+#define SET_SYS_INTOBJ(name)                                \
+    {                                                       \
+        PyObject* pyval = s_py.PyLong_FromLongLong(name);   \
+        if (pyval == NULL) {                                \
+            s_py.PyErr_Print();                             \
+            RELEASE_PYGIL();                                \
+            return 1004;                                    \
+        }                                                   \
+        if (s_py.PySys_SetObject(#name, pyval) != 0) {      \
+            s_py.PyErr_Print();                             \
+            s_py.Py_DecRef(pyval);                          \
+            RELEASE_PYGIL();                                \
+            return 1005;                                    \
+        }                                                   \
+        s_py.Py_DecRef(pyval);                              \
     }
+
+    SET_SYS_INTOBJ(LIBAVUTIL_VERSION_MAJOR)
+    SET_SYS_INTOBJ(AV_PIX_FMT_NB)
+
+#undef SET_SYS_INTOBJ
 
     // release the GIL, per Python control flow
     RELEASE_PYGIL();
@@ -603,6 +618,62 @@ static int uninit_pycontext(PythonContext* ctx) {
     return 0;
 }
 
+static int get_supported_formats(PyObject* filter_instance, enum AVPixelFormat** pix_fmts) {
+    PyObject *method = NULL, *args = NULL, *res = NULL, *elem = NULL;
+    enum AVPixelFormat* fmt = NULL;
+    int result = 0;
+    ACQUIRE_PYGIL();
+
+    if ((method = s_py.PyObject_GetAttrString(filter_instance, "get_formats")) == NULL) {
+        PyObject* exc = s_py.PyErr_Occurred();
+        if (exc == NULL) goto error;
+        if (s_py.PyErr_GivenExceptionMatches(exc, *s_py.PyExc_AttributeError)) {
+            // no attribute in a filter, default to rgb24
+            static enum AVPixelFormat static_fmt[] = {
+                AV_PIX_FMT_RGB24,
+                AV_PIX_FMT_NONE
+            };
+            *pix_fmts = static_fmt;
+        } else {
+            goto error;
+        }
+    } else {
+        Py_ssize_t size;
+        if ((args = s_py.PyTuple_New(0)) == NULL) goto error;
+        if ((res = s_py.PyObject_CallObject(method, args)) == NULL) goto error;
+        if (!s_py.PySequence_Check(res)) goto error;
+        if ((size = s_py.PySequence_Length(res)) == -1) goto error;
+        if ((fmt = calloc(size + 1, sizeof(enum AVPixelFormat))) == NULL) goto error;
+        
+        for (Py_ssize_t i = 0; i < size; i++) {
+            long elem_value;
+            if ((elem = s_py.PySequence_GetItem(res, i)) == NULL) goto error;
+            elem_value = s_py.PyLong_AsLong(elem);
+            if (elem_value == -1 && s_py.PyErr_Occurred()) goto error;
+            s_py.Py_DecRef(elem); // remember to decref the elem so we don't leak it on next iteration
+            elem = NULL;
+            if (elem_value < AV_PIX_FMT_NONE || elem_value > AV_PIX_FMT_NB) goto error;
+            fmt[i] = elem_value;
+        }
+        // last element should be AV_PIX_FMT_NONE
+        fmt[size] = AV_PIX_FMT_NONE;
+        *pix_fmts = fmt;
+    }
+
+finish:
+    s_py.Py_DecRef(elem);
+    s_py.Py_DecRef(res);
+    s_py.Py_DecRef(args);
+    s_py.Py_DecRef(method);
+    RELEASE_PYGIL();
+    return result;
+error:
+    s_py.PyErr_Print();
+    result = 1;
+    free(fmt);
+    goto finish;
+}
+
 // Interface from python wrapper to the filter
 
 
@@ -768,6 +839,7 @@ static int pythonCallProcess(AVFilterContext *ctx, void *arg, int jobnr, int nb_
 
 static int query_formats(AVFilterContext *ctx)
 {
+    /*
     static const enum AVPixelFormat pix_fmts[] = {
         AV_PIX_FMT_RGBA, AV_PIX_FMT_BGRA, AV_PIX_FMT_ARGB, AV_PIX_FMT_ABGR,
         AV_PIX_FMT_RGB24, AV_PIX_FMT_BGR24,
@@ -775,8 +847,16 @@ static int query_formats(AVFilterContext *ctx)
         AV_PIX_FMT_RGB565LE, AV_PIX_FMT_BGR565LE, AV_PIX_FMT_RGB555LE, AV_PIX_FMT_BGR555LE,
         AV_PIX_FMT_NONE
     };
+    */
+	PythonContext *s = ctx->priv;
+    enum AVPixelFormat* pix_fmts;
+    AVFilterFormats *fmts_list;
 
-    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
+    if (get_supported_formats(s->filter_instance, &pix_fmts) != 0) {
+        return AVERROR_EXTERNAL;
+    }
+    
+    fmts_list = ff_make_format_list(pix_fmts);
     if (!fmts_list)
         return AVERROR(ENOMEM);
     return ff_set_common_formats(ctx, fmts_list);

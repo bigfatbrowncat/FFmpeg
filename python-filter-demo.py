@@ -6,6 +6,9 @@ class Foo:
     def __init__(self, arg):
         print(f"Got <{arg}>!")
 
+    def get_formats(self):
+        return [ffmpeg_api.AVPixelFormat.RGB24]
+
     @ffmpeg_api.unpack_frames
     def __call__(self, av_in, av_out):
         src = av_in.get_data(0, (av_in.height, av_in.linesize[0] // 3, 3))
