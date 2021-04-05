@@ -222,3 +222,12 @@ def convert_pixformat(func):
         return [FORMAT_BY_NAME.get(r, r) for r in res]
 
     return wrapper
+
+
+def wrap_filter(cls):
+    try:
+        cls.get_formats = convert_pixformat(cls.get_formats)
+    except AttributeError:
+        pass
+    cls.__call__ = unpack_frames(cls.__call__)
+    return cls

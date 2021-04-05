@@ -2,15 +2,14 @@ import ffmpeg_api
 import cv2
 
 
+@ffmpeg_api.wrap_filter
 class Foo:
     def __init__(self, arg):
         print(f"Got <{arg}>!")
 
-    @ffmpeg_api.convert_pixformat
     def get_formats(self):
         return ["rgb24"]
 
-    @ffmpeg_api.unpack_frames
     def __call__(self, av_in, av_out):
         components = av_in.format.nb_components
         src = av_in.get_data(
