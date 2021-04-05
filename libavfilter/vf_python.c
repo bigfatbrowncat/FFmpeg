@@ -203,6 +203,7 @@ typedef struct py_embed {
     int (*PyImport_AppendInittab)(const char *name, PyObject* (*initfunc)(void));
     PyObject* (*PySys_GetObject)(const char *name);
     int (*PyDict_SetItemString)(PyObject *p, const char *key, PyObject *val);
+    void (*PyErr_Clear)(void);
 
     PyOS_sighandler_t (*PyOS_getsig)(int i);
     PyOS_sighandler_t (*PyOS_setsig)(int i, PyOS_sighandler_t h);
@@ -281,6 +282,7 @@ static int fill_pyembed(lib_handle_t hpylib) {
     GET_SYMBOL(PyImport_AppendInittab);
     GET_SYMBOL(PySys_GetObject);
     GET_SYMBOL(PyDict_SetItemString);
+    GET_SYMBOL(PyErr_Clear);
 
     GET_SYMBOL(PyOS_getsig);
     GET_SYMBOL(PyOS_setsig);
@@ -444,7 +446,9 @@ static int init_embed_python(const char* pylib) {
         file_input = s_py.PyLong_AsLong(pyFileInput);
         s_py.Py_DecRef(pyFileInput);
         if (file_input == -1) {
-            s_py.PyErr_Print();
+            if (s_py.PyErr_Occurred()) {
+                s_py.PyErr_Print();
+            }
             RELEASE_PYGIL();
             return 1003;
         }
@@ -624,7 +628,9 @@ static int init_pyfilter_class(PyObject* user_module, const char* cls_name, cons
     s_py.Py_DecRef(cls_type);
     return 0;
 error:
-    s_py.PyErr_Print();
+    if (s_py.PyErr_Occurred()) {
+        s_py.PyErr_Print();
+    }
     s_py.Py_DecRef(tuple);
     s_py.Py_DecRef(pyArg);
     s_py.Py_DecRef(cls_type);
@@ -650,7 +656,7 @@ static int init_pycontext(PythonContext* ctx) {
     res = get_user_module(ctx->script_filename, &(ctx->user_module));
     fprintf(stderr, "get_user_module returns %d\n", res);
     if (res != 0) {
-        if (res > 1000) {
+        if (s_py.PyErr_Occurred()) {
             s_py.PyErr_Print();
         }
         RELEASE_PYGIL();
@@ -687,13 +693,15 @@ static int get_supported_formats(PyObject* filter_instance, enum AVPixelFormat**
         PyObject* exc = s_py.PyErr_Occurred();
         if (exc == NULL) goto error;
         if (s_py.PyErr_GivenExceptionMatches(exc, *s_py.PyExc_AttributeError)) {
+            s_py.PyErr_Clear();
             // no attribute in a filter, default to rgb24
-            static enum AVPixelFormat static_fmt[] = {
-                AV_PIX_FMT_RGB24,
-                AV_PIX_FMT_NONE
-            };
-            *pix_fmts = static_fmt;
-            // FIXME: clear error
+            fmt = calloc(2, sizeof(enum AVPixelFormat));
+            if (fmt == NULL) {
+                goto error;
+            }
+            fmt[0] = AV_PIX_FMT_RGB24;
+            fmt[1] = AV_PIX_FMT_NONE;
+            *pix_fmts = fmt;
         } else {
             goto error;
         }
@@ -728,7 +736,9 @@ finish:
     RELEASE_PYGIL();
     return result;
 error:
-    s_py.PyErr_Print();
+    if (s_py.PyErr_Occurred()) {
+        s_py.PyErr_Print();
+    }
     result = 1;
     free(fmt);
     goto finish;
@@ -828,7 +838,9 @@ error:
             retval = AVERROR_EXIT;
         } else {
             retval = 1;
-            s_py.PyErr_Print();
+            if (exc != NULL) {
+                s_py.PyErr_Print();
+            }
         }
     }
     goto finish;
@@ -922,8 +934,10 @@ static int query_formats(AVFilterContext *ctx)
     }
     
     fmts_list = ff_make_format_list(pix_fmts);
-    if (!fmts_list)
+    free(pix_fmts);
+    if (!fmts_list) {
         return AVERROR(ENOMEM);
+    }
     return ff_set_common_formats(ctx, fmts_list);
 }
 
