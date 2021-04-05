@@ -196,6 +196,11 @@ typedef struct py_embed {
     int (*PySequence_Check)(PyObject *o);
     Py_ssize_t (*PySequence_Length)(PyObject *o);
     PyObject* (*PySequence_GetItem)(PyObject *o, Py_ssize_t i);
+    PyObject* (*PyModule_New)(const char *name);
+    int (*PyObject_SetAttrString)(PyObject *o, const char *attr_name, PyObject *v);
+    int (*PyImport_AppendInittab)(const char *name, PyObject* (*initfunc)(void));
+    PyObject* (*PySys_GetObject)(const char *name);
+    int (*PyDict_SetItemString)(PyObject *p, const char *key, PyObject *val);
 
     // internal data for working with Python
     int file_input; // token for Python compile() telling that this is a module we're Python-compiling
@@ -264,6 +269,11 @@ static int fill_pyembed(lib_handle_t hpylib) {
     GET_SYMBOL(PySequence_Check);
     GET_SYMBOL(PySequence_Length);
     GET_SYMBOL(PySequence_GetItem);
+    GET_SYMBOL(PyModule_New);
+    GET_SYMBOL(PyObject_SetAttrString);
+    GET_SYMBOL(PyImport_AppendInittab);
+    GET_SYMBOL(PySys_GetObject);
+    GET_SYMBOL(PyDict_SetItemString);
 
     GET_SYMBOL(PyExc_KeyboardInterrupt);
     GET_SYMBOL(PyExc_AttributeError);
@@ -323,6 +333,33 @@ static wchar_t* get_dir_name(wchar_t* file_name) {
     }
 }
 
+static PyObject* _create_pyapi_module(void) {
+    PyObject *mod = NULL, *pyval = NULL;
+    
+    if ((mod = s_py.PyModule_New("_ffmpeg")) == NULL) return NULL;
+
+#define SET_LONGLONG_ATTR2(value, name)                                                 \
+    {                                                                                   \
+        if ((pyval = s_py.PyLong_FromLongLong((long long)value)) == NULL) goto error;   \
+        if (s_py.PyObject_SetAttrString(mod, name, pyval) != 0) goto error;             \
+    }
+#define SET_LONGLONG_ATTR(name) SET_LONGLONG_ATTR2(name, #name)
+
+    SET_LONGLONG_ATTR(LIBAVUTIL_VERSION_MAJOR);
+    SET_LONGLONG_ATTR(AV_PIX_FMT_NB);
+    SET_LONGLONG_ATTR2(&av_pix_fmt_desc_next, "av_pix_fmt_desc_next");
+    SET_LONGLONG_ATTR2(&av_pix_fmt_desc_get_id, "av_pix_fmt_desc_get_id");
+
+#undef SET_LONGLONG_ATTR
+#undef SET_LONGLONG_ATTR2
+
+    return mod;
+error:
+    s_py.Py_DecRef(mod);
+    s_py.Py_DecRef(pyval);
+    return NULL;
+}
+
 static int init_embed_python(const char* pylib) {
     // set program name so on *nix Python can find its prefix from it
     size_t main_sz;
@@ -347,6 +384,7 @@ static int init_embed_python(const char* pylib) {
 #error Implement me properly if needed
 #endif
     }
+    //if (s_py.PyImport_AppendInittab("_ffmpeg", _create_pyapi_module) != 0) return ENOMEM;
 
 #ifdef _WIN32
     {
@@ -388,28 +426,25 @@ static int init_embed_python(const char* pylib) {
         }
         s_py.file_input = file_input;
     }
-
-#define SET_SYS_INTOBJ(name)                                \
-    {                                                       \
-        PyObject* pyval = s_py.PyLong_FromLongLong(name);   \
-        if (pyval == NULL) {                                \
-            s_py.PyErr_Print();                             \
-            RELEASE_PYGIL();                                \
-            return 1004;                                    \
-        }                                                   \
-        if (s_py.PySys_SetObject(#name, pyval) != 0) {      \
-            s_py.PyErr_Print();                             \
-            s_py.Py_DecRef(pyval);                          \
-            RELEASE_PYGIL();                                \
-            return 1005;                                    \
-        }                                                   \
-        s_py.Py_DecRef(pyval);                              \
+    {
+        PyObject* sys_modules = s_py.PySys_GetObject("modules");
+        PyObject* _ffmpeg_mod = _create_pyapi_module();
+        if (sys_modules != NULL && _ffmpeg_mod != NULL) {
+            if (s_py.PyDict_SetItemString(sys_modules, "_ffmpeg", _ffmpeg_mod) != 0) {
+                s_py.Py_DecRef(_ffmpeg_mod);
+                s_py.Py_DecRef(sys_modules);
+                RELEASE_PYGIL();
+                return 1004;
+            }
+        } else {
+            s_py.Py_DecRef(_ffmpeg_mod);
+            s_py.Py_DecRef(sys_modules);
+            RELEASE_PYGIL();
+            return 1004;
+        }
+        s_py.Py_DecRef(_ffmpeg_mod);
+        s_py.Py_DecRef(sys_modules);
     }
-
-    SET_SYS_INTOBJ(LIBAVUTIL_VERSION_MAJOR)
-    SET_SYS_INTOBJ(AV_PIX_FMT_NB)
-
-#undef SET_SYS_INTOBJ
 
     // release the GIL, per Python control flow
     RELEASE_PYGIL();
