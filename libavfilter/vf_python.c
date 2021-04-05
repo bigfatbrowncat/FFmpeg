@@ -23,6 +23,7 @@
 #error Unsupported platform
 #endif
 
+#include <signal.h>
 
 #include "libavutil/pixdesc.h"
 #include "libavutil/intreadwrite.h"
@@ -146,13 +147,14 @@ typedef struct PyObject_ PyObject;
 typedef struct PyCompilerFlags_ PyCompilerFlags;
 typedef size_t Py_ssize_t;
 typedef struct PyThreadState_ PyThreadState;
+typedef void (*PyOS_sighandler_t)(int);
 
 typedef struct py_embed {
     lib_handle_t hlib;
     char* ffmpeg_exe;
 
     // Python C API loaded dynamically
-    void (*Py_Initialize)(void);
+    void (*Py_InitializeEx)(int initsigs);
     int (*Py_FinalizeEx)(void);
     PyObject* (*Py_CompileStringObject)(const char *str, PyObject *filename, int start, PyCompilerFlags *flags, int optimize);
     PyObject* (*PyUnicode_DecodeFSDefault)(const char *s);
@@ -202,6 +204,9 @@ typedef struct py_embed {
     PyObject* (*PySys_GetObject)(const char *name);
     int (*PyDict_SetItemString)(PyObject *p, const char *key, PyObject *val);
 
+    PyOS_sighandler_t (*PyOS_getsig)(int i);
+    PyOS_sighandler_t (*PyOS_setsig)(int i, PyOS_sighandler_t h);
+
     // internal data for working with Python
     int file_input; // token for Python compile() telling that this is a module we're Python-compiling
     wchar_t* program_name; // what we set via Py_SetProgramName()
@@ -209,6 +214,8 @@ typedef struct py_embed {
     PyThreadState* tstate;
     PyObject** PyExc_KeyboardInterrupt;
     PyObject** PyExc_AttributeError;
+    PyOS_sighandler_t py_sigint, core_sigint;
+    PyOS_sighandler_t py_sigterm, core_sigterm;
 } py_embed_t;
 
 static py_embed_t s_py = { NULL };
@@ -224,7 +231,7 @@ static int fill_pyembed(lib_handle_t hpylib) {
     s_py.name = hpylib.get_sym(&hpylib, #name); \
     if (s_py.name == NULL) return 4;
 
-    GET_SYMBOL(Py_Initialize);
+    GET_SYMBOL(Py_InitializeEx);
     GET_SYMBOL(Py_FinalizeEx);
     GET_SYMBOL(Py_CompileStringObject);
 
@@ -275,6 +282,9 @@ static int fill_pyembed(lib_handle_t hpylib) {
     GET_SYMBOL(PySys_GetObject);
     GET_SYMBOL(PyDict_SetItemString);
 
+    GET_SYMBOL(PyOS_getsig);
+    GET_SYMBOL(PyOS_setsig);
+
     GET_SYMBOL(PyExc_KeyboardInterrupt);
     GET_SYMBOL(PyExc_AttributeError);
 
@@ -282,8 +292,20 @@ static int fill_pyembed(lib_handle_t hpylib) {
     return 0;
 }
 
-#define ACQUIRE_PYGIL() (s_py.PyEval_RestoreThread(s_py.tstate))
-#define RELEASE_PYGIL() (s_py.tstate = s_py.PyEval_SaveThread())
+#define ACQUIRE_PYGIL() {                       \
+    s_py.PyEval_RestoreThread(s_py.tstate);     \
+    s_py.PyOS_setsig(SIGINT, s_py.py_sigint);   \
+    s_py.PyOS_setsig(SIGTERM, s_py.py_sigterm); \
+}
+#define RELEASE_PYGIL() {                           \
+    s_py.py_sigint = s_py.PyOS_getsig(SIGINT);      \
+    s_py.py_sigterm = s_py.PyOS_getsig(SIGTERM);    \
+                                                    \
+    s_py.PyOS_setsig(SIGINT, s_py.core_sigint);     \
+    s_py.PyOS_setsig(SIGTERM, s_py.core_sigterm);   \
+                                                    \
+    s_py.tstate = s_py.PyEval_SaveThread();         \
+}
 
 // stolen from Python/Include/object.h
 #define PyBUF_READ  0x100
@@ -398,9 +420,11 @@ static int init_embed_python(const char* pylib) {
         // DEBUG things end
     }
 #endif
+    s_py.core_sigint = s_py.PyOS_getsig(SIGINT);
+    s_py.core_sigterm = s_py.PyOS_getsig(SIGTERM);
 
-    // FIXME: Py_Initialize() installs Ctrl-C handler - is this what we want?..
-    s_py.Py_Initialize();
+    s_py.Py_InitializeEx(0 /* 0 means do not install signal handlers */);
+
     {
         PyObject* modSymbol = s_py.PyImport_ImportModule("symbol");
         PyObject* pyFileInput;
@@ -669,6 +693,7 @@ static int get_supported_formats(PyObject* filter_instance, enum AVPixelFormat**
                 AV_PIX_FMT_NONE
             };
             *pix_fmts = static_fmt;
+            // FIXME: clear error
         } else {
             goto error;
         }
@@ -725,7 +750,6 @@ static int init_python_library_and_script(const char* dllfile, const char* pyfil
         if (fill_pyembed(hlib) != 0) {
             return 2;
         }
-
         if (init_embed_python(dllfile) != 0) {
             return 3;
         }
@@ -859,7 +883,13 @@ static int pythonCallProcess(AVFilterContext *ctx, void *arg, int jobnr, int nb_
         switch (pycall_res) {
             case 0: break;
             case AVERROR_EXIT:
-                return pycall_res;
+                // ctrl-c was hit, re-raise
+#ifdef HAVE_SETCONSOLECTRLHANDLER
+                return GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) ? 0 : AVERROR_EXTERNAL;
+#else
+                raise(SIGINT);
+#endif
+                return 0;
             default:
                 fprintf(stderr, "python_call returns %d\n", pycall_res);
                 fflush(stderr);
