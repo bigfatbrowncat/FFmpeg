@@ -10,6 +10,7 @@ import numpy.ctypeslib as np_ctypes
 import ctypes
 from ctypes import (
     c_int,
+    c_uint,
     c_int8,
     c_uint8,
     c_int64,
@@ -17,6 +18,7 @@ from ctypes import (
     c_size_t,
     c_void_p,
     c_char_p,
+    c_double,
     POINTER,
 )
 
@@ -224,9 +226,139 @@ def convert_pixformat(func):
     return wrapper
 
 
+class AVFilterContext(ctypes.Structure):
+    pass  # _fields_ would be added later
+
+
+class AVFilterPad(ctypes.Structure):
+    _fields_ = [
+        ("name", c_char_p),
+        ("type", c_int),
+        ("get_video_buffer", c_void_p),
+        ("get_audio_buffer", c_void_p),
+        ("filter_frame", c_void_p),
+        ("request_frame", c_void_p),
+        ("config_props", c_void_p),
+        ("needs_writable", c_int),
+    ]
+
+
+class AVFilterFormats(ctypes.Structure):
+    _fields_ = [
+        ("nb_formats", c_uint),
+        ("formats", ctypes.POINTER(c_int)),
+        ("refcount", c_uint),
+        ("refs", c_void_p),
+    ]
+
+
+class AVFilterChannelLayouts(ctypes.Structure):
+    _fields_ = [
+        ("channel_layouts", ctypes.POINTER(c_uint64)),
+        ("nb_channel_layouts", c_int),
+        ("all_layouts", c_int),
+        ("all_counts", c_int),
+        ("refcount", c_uint),
+        ("refs", c_void_p),
+    ]
+
+
+class AVFilterFormatsConfig(ctypes.Structure):
+    _fields_ = [
+        ("formats", ctypes.POINTER(AVFilterFormats)),
+        ("samplerates", ctypes.POINTER(AVFilterFormats)),
+        ("channel_layouts", ctypes.POINTER(AVFilterChannelLayouts)),
+    ]
+
+
+class AVFilterLink(ctypes.Structure):
+    _fields_ = [
+        ("src", ctypes.POINTER(AVFilterContext)),
+        ("srcpad", ctypes.POINTER(AVFilterPad)),
+        ("dst", ctypes.POINTER(AVFilterContext)),
+        ("dstpad", ctypes.POINTER(AVFilterPad)),
+        ("type", c_int),
+        ("w", c_int),
+        ("h", c_int),
+        ("sample_aspect_ratio", AVRational),
+        ("channel_layout", c_uint64),
+        ("sample_rate", c_int),
+        ("format", c_int),
+        ("time_base", AVRational),
+        ("incfg", AVFilterFormatsConfig),
+        ("outcfg", AVFilterFormatsConfig),
+        ("init_state", c_int),
+        ("graph", c_void_p),
+        ("current_pts", c_int64),
+        ("current_pts_us", c_int64),
+        ("age_index", c_int),
+        ("frame_rate", AVRational),
+        ("partial_buf", c_void_p),
+        ("partial_buf_size", c_int),
+        ("min_samples", c_int),
+        ("max_samples", c_int),
+        ("channels", c_int),
+        ("frame_count_in", c_int64),
+        ("frame_count_out", c_int64),
+        ("frame_pool", c_void_p),
+        ("frame_wanted_out", c_int),
+        ("hw_frames_ctx", c_void_p),
+        ("reserved", c_uint8 * 0xF000),
+    ]
+
+
+AVFilterContext._fields_ = [
+    ("av_class", c_void_p),
+    ("filter", c_void_p),
+    ("name", c_char_p),
+    ("input_pads", ctypes.POINTER(AVFilterPad)),
+    ("inputs", ctypes.POINTER(ctypes.POINTER(AVFilterLink))),
+    ("nb_inputs", c_uint),
+    ("output_pads", ctypes.POINTER(AVFilterPad)),
+    ("outputs", ctypes.POINTER(ctypes.POINTER(AVFilterLink))),
+    ("nb_outputs", c_uint),
+    ("priv", c_void_p),
+    ("graph", c_void_p),
+    ("thread_type", c_int),
+    ("internal", c_void_p),
+    ("command_queue", c_void_p),
+    ("enable_str", c_char_p),
+    ("enable", c_void_p),
+    ("var_values", ctypes.POINTER(c_double)),
+    ("is_disabled", c_int),
+    ("hw_device_ctx", c_void_p),
+    ("nb_threads", c_int),
+    ("ready", c_uint),
+    ("extra_hw_frames", c_int),
+]
+
+
+def unpack_filterlink(func):
+    def transform(x):
+        return AVFilterLink.from_buffer(x) if isinstance(x, memoryview) else x
+
+    def wrapped(*args, **kw):
+        import pdb;pdb.set_trace()
+
+        nargs = tuple(transform(arg) for arg in args)
+        nkw = {k: transform(v) for k, v in kw.items()}
+
+        return func(*nargs, **nkw)
+
+    return wrapped
+
+
 def wrap_filter(cls):
     try:
         cls.get_formats = convert_pixformat(cls.get_formats)
+    except AttributeError:
+        pass
+    try:
+        cls.config_input = unpack_filterlink(cls.config_input)
+    except AttributeError:
+        pass
+    try:
+        cls.config_output = unpack_filterlink(cls.config_output)
     except AttributeError:
         pass
     cls.__call__ = unpack_frames(cls.__call__)

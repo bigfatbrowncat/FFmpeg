@@ -691,20 +691,17 @@ static int get_supported_formats(PyObject* filter_instance, enum AVPixelFormat**
 
     if ((method = s_py.PyObject_GetAttrString(filter_instance, "get_formats")) == NULL) {
         PyObject* exc = s_py.PyErr_Occurred();
-        if (exc == NULL) goto error;
-        if (s_py.PyErr_GivenExceptionMatches(exc, *s_py.PyExc_AttributeError)) {
-            s_py.PyErr_Clear();
-            // no attribute in a filter, default to rgb24
-            fmt = calloc(2, sizeof(enum AVPixelFormat));
-            if (fmt == NULL) {
-                goto error;
-            }
-            fmt[0] = AV_PIX_FMT_RGB24;
-            fmt[1] = AV_PIX_FMT_NONE;
-            *pix_fmts = fmt;
-        } else {
+        if (exc == NULL || !s_py.PyErr_GivenExceptionMatches(exc, *s_py.PyExc_AttributeError)) goto error;
+
+        s_py.PyErr_Clear();
+        // no attribute in a filter, default to rgb24
+        fmt = calloc(2, sizeof(enum AVPixelFormat));
+        if (fmt == NULL) {
             goto error;
         }
+        fmt[0] = AV_PIX_FMT_RGB24;
+        fmt[1] = AV_PIX_FMT_NONE;
+        *pix_fmts = fmt;
     } else {
         Py_ssize_t size;
         if ((args = s_py.PyTuple_New(0)) == NULL) goto error;
@@ -846,6 +843,36 @@ error:
     goto finish;
 }
 
+static int python_config_link(PyObject* filter_instance, const char* method_name, AVFilterLink* link) {
+    PyObject *method = NULL, *args = NULL, *tmpview = NULL, *res = NULL;
+    int result = 0;
+
+    if ((method = s_py.PyObject_GetAttrString(filter_instance, method_name)) == NULL) {
+        PyObject* exc = s_py.PyErr_Occurred();
+        if (exc == NULL || !s_py.PyErr_GivenExceptionMatches(exc, *s_py.PyExc_AttributeError)) goto error;
+        s_py.PyErr_Clear();
+        goto finish;
+    }
+    if ((args = s_py.PyTuple_New(1)) == NULL) goto error;
+    if ((tmpview = s_py.PyMemoryView_FromMemory((char*)link, sizeof(AVFilterLink), PyBUF_WRITE))) goto error;
+    if (s_py.PyTuple_SetItem(args, 0, tmpview) != 0) goto error;
+    tmpview = NULL;
+    
+    if ((res = s_py.PyObject_CallObject(method, args)) == NULL) goto error;
+
+finish:
+    s_py.Py_DecRef(method);
+    s_py.Py_DecRef(args);
+    s_py.Py_DecRef(tmpview);
+    s_py.Py_DecRef(res);
+    return result;
+error:
+    if (s_py.PyErr_Occurred()) {
+        s_py.PyErr_Print();
+    }
+    result = 1;
+    goto finish;
+}
 
 
 #define OFFSET(x) offsetof(PythonContext, x)
@@ -983,12 +1010,16 @@ static int config_input(AVFilterLink *inlink)
         s->bpp = 2;
         break;
     }*/
+    PythonContext *s = inlink->dst->priv;
 
-    return 0;
+    int res = python_config_link(s->filter_instance, "config_input", inlink);
+
+    return AVERROR(res);
 }
 
 static int config_output(AVFilterLink *outlink)
 {
+    /*
     AVFilterLink *inlink = outlink->src->inputs[0];
 
     outlink->w = inlink->w*4;
@@ -999,6 +1030,12 @@ static int config_output(AVFilterLink *outlink)
            inlink->w, inlink->h, outlink->w, outlink->h);
 
     return 0;
+    */
+    PythonContext *s = outlink->dst->priv;
+
+    int res = python_config_link(s->filter_instance, "config_output", outlink);
+
+    return AVERROR(res);
 }
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *in)
