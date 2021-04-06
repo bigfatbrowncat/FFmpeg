@@ -10,7 +10,7 @@ class Foo:
 
     def get_formats(
         self,
-    ) -> typing.List[typing.Union[str, ffmpeg_api.AVPixFmtDescriptor, int]]:
+    ) -> typing.Sequence[typing.Union[str, ffmpeg_api.AVPixFmtDescriptor, int]]:
         return ["rgb24"]
 
     def config_output(self, outlink: ffmpeg_api.AVFilterLink):

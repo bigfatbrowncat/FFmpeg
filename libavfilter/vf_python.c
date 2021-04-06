@@ -846,6 +846,7 @@ error:
 static int python_config_link(PyObject* filter_instance, const char* method_name, AVFilterLink* link) {
     PyObject *method = NULL, *args = NULL, *tmpview = NULL, *res = NULL;
     int result = 0;
+    ACQUIRE_PYGIL();
 
     if ((method = s_py.PyObject_GetAttrString(filter_instance, method_name)) == NULL) {
         PyObject* exc = s_py.PyErr_Occurred();
@@ -854,7 +855,7 @@ static int python_config_link(PyObject* filter_instance, const char* method_name
         goto finish;
     }
     if ((args = s_py.PyTuple_New(1)) == NULL) goto error;
-    if ((tmpview = s_py.PyMemoryView_FromMemory((char*)link, sizeof(AVFilterLink), PyBUF_WRITE))) goto error;
+    if ((tmpview = s_py.PyMemoryView_FromMemory((char*)link, sizeof(AVFilterLink), PyBUF_WRITE)) == NULL) goto error;
     if (s_py.PyTuple_SetItem(args, 0, tmpview) != 0) goto error;
     tmpview = NULL;
     
@@ -865,6 +866,7 @@ finish:
     s_py.Py_DecRef(args);
     s_py.Py_DecRef(tmpview);
     s_py.Py_DecRef(res);
+    RELEASE_PYGIL();
     return result;
 error:
     if (s_py.PyErr_Occurred()) {
@@ -1031,7 +1033,7 @@ static int config_output(AVFilterLink *outlink)
 
     return 0;
     */
-    PythonContext *s = outlink->dst->priv;
+    PythonContext *s = outlink->src->priv;
 
     int res = python_config_link(s->filter_instance, "config_output", outlink);
 

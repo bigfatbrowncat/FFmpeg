@@ -227,7 +227,14 @@ def convert_pixformat(func):
 
 
 class AVFilterContext(ctypes.Structure):
-    pass  # _fields_ would be added later
+    # _fields_ would be added later
+    @property
+    def inputs(self):
+        return self._inputs.contents
+
+    @property
+    def outputs(self):
+        return self._outputs.contents
 
 
 class AVFilterPad(ctypes.Structure):
@@ -273,9 +280,9 @@ class AVFilterFormatsConfig(ctypes.Structure):
 
 class AVFilterLink(ctypes.Structure):
     _fields_ = [
-        ("src", ctypes.POINTER(AVFilterContext)),
+        ("_src", ctypes.POINTER(AVFilterContext)),
         ("srcpad", ctypes.POINTER(AVFilterPad)),
-        ("dst", ctypes.POINTER(AVFilterContext)),
+        ("_dst", ctypes.POINTER(AVFilterContext)),
         ("dstpad", ctypes.POINTER(AVFilterPad)),
         ("type", c_int),
         ("w", c_int),
@@ -306,16 +313,24 @@ class AVFilterLink(ctypes.Structure):
         ("reserved", c_uint8 * 0xF000),
     ]
 
+    @property
+    def src(self):
+        return self._src.contents
+
+    @property
+    def dst(self):
+        return self._dst.contents
+
 
 AVFilterContext._fields_ = [
     ("av_class", c_void_p),
     ("filter", c_void_p),
     ("name", c_char_p),
     ("input_pads", ctypes.POINTER(AVFilterPad)),
-    ("inputs", ctypes.POINTER(ctypes.POINTER(AVFilterLink))),
+    ("_inputs", ctypes.POINTER(ctypes.POINTER(AVFilterLink))),
     ("nb_inputs", c_uint),
     ("output_pads", ctypes.POINTER(AVFilterPad)),
-    ("outputs", ctypes.POINTER(ctypes.POINTER(AVFilterLink))),
+    ("_outputs", ctypes.POINTER(ctypes.POINTER(AVFilterLink))),
     ("nb_outputs", c_uint),
     ("priv", c_void_p),
     ("graph", c_void_p),
@@ -338,8 +353,6 @@ def unpack_filterlink(func):
         return AVFilterLink.from_buffer(x) if isinstance(x, memoryview) else x
 
     def wrapped(*args, **kw):
-        import pdb;pdb.set_trace()
-
         nargs = tuple(transform(arg) for arg in args)
         nkw = {k: transform(v) for k, v in kw.items()}
 
