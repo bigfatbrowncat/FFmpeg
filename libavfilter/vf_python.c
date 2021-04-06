@@ -24,6 +24,9 @@
 #endif
 
 #include <signal.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #include "libavutil/pixdesc.h"
 #include "libavutil/intreadwrite.h"
@@ -134,6 +137,72 @@ typedef struct PythonContext {
 	PyObject* user_module;
     PyObject* filter_instance;
 } PythonContext;
+
+static int expand_script_filename(PythonContext* ctx) {
+#ifdef _WIN32
+    const char* env_sep = ";";
+    const char path_sep[] = {'/', '\\'};
+    #define strtok_r(s, delim, save) (strtok_s(s, delim, save))
+    struct _stat64 stat_buf;
+    #define is_file(path) ((_stat64(path, &stat_buf) == 0) && ((stat_buf.st_mode & _S_IFREG) != 0))
+#else
+    const char* env_sep = ":";
+    const char path_sep[] = {'/'};
+    struct stat stat_buf;
+    #define is_file(path) ((stat(path, &stat_buf) == 0) && ((stat_buf.st_mode & _S_IFREG) != 0))
+#endif
+    char *save, *fname, *token, *env_path, *start;
+    size_t buf_size;
+
+    for (int i = 0; i < sizeof(path_sep) / sizeof(path_sep[0]); i++) {
+        if (strchr(ctx->script_filename, path_sep[i]) != NULL) {
+            // script path has some slashes -> no search
+            return 0;
+        }
+    }
+
+    // check if file is in current working directory first before searching PATH
+    if (is_file(ctx->script_filename)) {
+        return 0;
+    }
+
+    // file is not present in current working dir, check $PATH for it
+    if ((env_path = getenv("PATH")) == NULL) return 0;
+    if ((start = strdup(env_path)) == NULL) return AVERROR(ENOMEM);
+
+    buf_size = sizeof(char) * (strlen(env_path) + 1 /* path sep */ + strlen(ctx->script_filename) + 1 /* null term*/);
+
+    if ((fname = malloc(buf_size)) == NULL) {
+        free(start);
+        return AVERROR(ENOMEM);
+    }
+    for (token = strtok_r(start, env_sep, &save); token != NULL; token = strtok_r(NULL, env_sep, &save)) {
+        memset(fname, 0, buf_size);
+        strcat(strcat(strcat(fname, token), "/"), ctx->script_filename);
+
+        if (is_file(fname)) {
+            // found the file!
+            size_t len = sizeof(char) * (strlen(fname) + 1);
+            char *copy = av_malloc(len);
+            if (copy == NULL) {
+                free(fname);
+                free(start);
+                return AVERROR(ENOMEM);
+            }
+            memcpy(copy, fname, len);
+            free(fname);
+            free(start);
+            ctx->script_filename = copy;
+            return 0;
+        }
+    }
+
+    free(fname);
+    free(start);
+#undef is_file
+
+    return AVERROR_FILTER_NOT_FOUND;
+}
 
 typedef struct py_embed {
     lib_handle_t hlib;
@@ -1006,6 +1075,9 @@ static av_cold int init(AVFilterContext *ctx)
 {
     int res;
     PythonContext *s = ctx->priv;
+
+    res = expand_script_filename(s);
+    if (res != 0) return res;
 
     fprintf(stderr, "python_library: %s\n", s->python_library); fflush(stderr);
     fprintf(stderr, "script_filename: %s\n", s->script_filename); fflush(stderr);
