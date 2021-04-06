@@ -4,6 +4,7 @@ try:
 except ImportError:
     raise ImportError("Please use ffmpeg_api from within ffmpeg python filter")
 
+import sys
 import numpy as np
 import numpy.ctypeslib as np_ctypes
 
@@ -394,3 +395,48 @@ def wrap_filter(cls):
 
     cls.__call__ = unpack_frames(cls.__call__)
     return cls
+
+
+class AVLog:
+    PANIC = _ffmpeg.AV_LOG_PANIC
+    FATAL = _ffmpeg.AV_LOG_FATAL
+    ERROR = _ffmpeg.AV_LOG_ERROR
+    WARNING = _ffmpeg.AV_LOG_WARNING
+    INFO = _ffmpeg.AV_LOG_INFO
+    VERBOSE = _ffmpeg.AV_LOG_VERBOSE
+    TRACE = _ffmpeg.AV_LOG_TRACE
+
+    _av_log = ctypes.CFUNCTYPE(None, c_int, c_char_p)(_ffmpeg._av_log)
+
+    _all_levels = {PANIC, FATAL, ERROR, WARNING, INFO, VERBOSE, TRACE}
+
+    @classmethod
+    def log(cls, level, message, endl="\n"):
+        if isinstance(level, str) and hasattr(cls, level):
+            level = getattr(cls, level)
+        assert level in cls._all_levels, f"Unsupported log level: {level}"
+
+        if isinstance(message, str):
+            message = message.encode("utf8")
+        assert isinstance(
+            message, bytes
+        ), f"Message must be str or bytes, got {type(message)}"
+
+        if isinstance(endl, str):
+            endl = endl.encode("utf8")
+        assert isinstance(
+            endl, bytes
+        ), f"End-line must be str or bytes, got {type(endl)}"
+        cls._av_log(level, message + endl)
+
+    @classmethod
+    def write(cls, msg):
+        """For pretending to be a file-like object"""
+        cls.log(cls.INFO, msg, endl="")
+
+    @staticmethod
+    def flush():
+        pass
+
+
+sys.stdout = AVLog

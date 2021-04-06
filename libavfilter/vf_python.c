@@ -345,6 +345,10 @@ static wchar_t* get_dir_name(wchar_t* file_name) {
     }
 }
 
+static void python_av_log(int level, const char* msg) {
+    av_log(s_py.ctx, level, "%s", msg);
+}
+
 static PyObject* _create_pyapi_module(void) {
     PyObject *mod = NULL, *pyval = NULL;
     
@@ -361,6 +365,15 @@ static PyObject* _create_pyapi_module(void) {
     SET_LONGLONG_ATTR(AV_PIX_FMT_NB);
     SET_LONGLONG_ATTR2(&av_pix_fmt_desc_next, "av_pix_fmt_desc_next");
     SET_LONGLONG_ATTR2(&av_pix_fmt_desc_get_id, "av_pix_fmt_desc_get_id");
+
+    SET_LONGLONG_ATTR2(&python_av_log, "_av_log");
+    SET_LONGLONG_ATTR(AV_LOG_PANIC);
+    SET_LONGLONG_ATTR(AV_LOG_FATAL);
+    SET_LONGLONG_ATTR(AV_LOG_ERROR);
+    SET_LONGLONG_ATTR(AV_LOG_WARNING);
+    SET_LONGLONG_ATTR(AV_LOG_INFO);
+    SET_LONGLONG_ATTR(AV_LOG_VERBOSE);
+    SET_LONGLONG_ATTR(AV_LOG_TRACE);
 
 #undef SET_LONGLONG_ATTR
 #undef SET_LONGLONG_ATTR2

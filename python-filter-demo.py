@@ -15,9 +15,11 @@ class Foo:
     def get_formats() -> typing.Sequence[
         typing.Union[str, ffmpeg_api.AVPixFmtDescriptor, int]
     ]:
+        print('hello from get_formats!')
         return ["rgb24"]
 
     def config_output(self, outlink: ffmpeg_api.AVFilterLink):
+        ffmpeg_api.AVLog.log(ffmpeg_api.AVLog.WARNING, "test warning")
         inlink = outlink.src.inputs[0]
         outlink.w = inlink.w * self.zoom
         outlink.h = inlink.h * self.zoom
