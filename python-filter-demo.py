@@ -6,7 +6,10 @@ import typing
 @ffmpeg_api.wrap_filter
 class Foo:
     def __init__(self, arg: str):
-        print(f"Got <{arg}>!")
+        try:
+            self.zoom = int(arg)
+        except ValueError:
+            raise ValueError(f"Argument should be zoom factor, got {arg}")
 
     def get_formats(
         self,
@@ -15,8 +18,8 @@ class Foo:
 
     def config_output(self, outlink: ffmpeg_api.AVFilterLink):
         inlink = outlink.src.inputs[0]
-        outlink.w = inlink.w * 4
-        outlink.h = inlink.h * 4
+        outlink.w = inlink.w * self.zoom
+        outlink.h = inlink.h * self.zoom
 
     def __call__(self, av_in: ffmpeg_api.AVFrame, av_out: ffmpeg_api.AVFrame):
         components = av_in.format.nb_components
