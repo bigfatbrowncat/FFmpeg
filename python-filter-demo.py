@@ -16,7 +16,8 @@ class Foo:
         typing.Union[str, ffmpeg_api.AVPixFmtDescriptor, int]
     ]:
         print("hello from get_formats!")
-        return ["rgb24"]
+        # return ["rgb24"] # this works, too
+        return [ffmpeg_api.AVPixFmt.RGB24]
 
     def config_output(self, outlink: ffmpeg_api.AVFilterLink):
         ffmpeg_api.AVLog.log(ffmpeg_api.AVLog.WARNING, "test warning")
@@ -36,4 +37,3 @@ class Foo:
         dw, dh = av_out.width, av_out.height
         img = cv2.resize(src, (dw, dh), interpolation=cv2.INTER_CUBIC)
         dst[:dh, :dw, :] = img[:dh, :dw, :]
-

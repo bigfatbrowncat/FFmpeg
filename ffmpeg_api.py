@@ -230,6 +230,10 @@ MAX_FORMAT = int(max(PIXEL_FORMATS, key=int))
 FORMAT_BY_NAME = {fmt.name: fmt for fmt in PIXEL_FORMATS}
 FORMAT_BY_ID = {int(fmt): fmt for fmt in PIXEL_FORMATS}
 
+class AVPixFmt:
+    RGB24 = FORMAT_BY_NAME['rgb24']
+    YUB420P = FORMAT_BY_NAME['yuv420p']
+
 
 @staticmethod_helper
 def convert_pixformat(func):
