@@ -132,7 +132,9 @@ def staticmethod_helper(decorator):
             is_static = False
         res = decorator(func)
         return staticmethod(res) if is_static else res
+
     return wrapped_decorator
+
 
 @staticmethod_helper
 def unpack_frames(func):

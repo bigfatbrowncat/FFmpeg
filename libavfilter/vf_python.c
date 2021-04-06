@@ -972,71 +972,15 @@ static int query_formats(AVFilterContext *ctx)
 
 static int config_input(AVFilterLink *inlink)
 {
-    //PythonContext *s = inlink->dst->priv;
-
-    // TODO Here we should call a function that takes (w_in, h_in) and returns (w_out, h_out)
-
-    /*s->hi_pixel_mask   = 0xFEFEFEFE;
-    s->lo_pixel_mask   = 0x01010101;
-    s->q_hi_pixel_mask = 0xFCFCFCFC;
-    s->q_lo_pixel_mask = 0x03030303;
-    s->bpp  = 4;
-
-    switch (inlink->format) {
-    case AV_PIX_FMT_RGB24:
-    case AV_PIX_FMT_BGR24:
-        s->bpp = 3;
-        break;
-
-    case AV_PIX_FMT_RGB565BE:
-    case AV_PIX_FMT_BGR565BE:
-        s->is_be = 1;
-    case AV_PIX_FMT_RGB565LE:
-    case AV_PIX_FMT_BGR565LE:
-        s->hi_pixel_mask   = 0xF7DEF7DE;
-        s->lo_pixel_mask   = 0x08210821;
-        s->q_hi_pixel_mask = 0xE79CE79C;
-        s->q_lo_pixel_mask = 0x18631863;
-        s->bpp = 2;
-        break;
-
-    case AV_PIX_FMT_BGR555BE:
-    case AV_PIX_FMT_RGB555BE:
-        s->is_be = 1;
-    case AV_PIX_FMT_BGR555LE:
-    case AV_PIX_FMT_RGB555LE:
-        s->hi_pixel_mask   = 0x7BDE7BDE;
-        s->lo_pixel_mask   = 0x04210421;
-        s->q_hi_pixel_mask = 0x739C739C;
-        s->q_lo_pixel_mask = 0x0C630C63;
-        s->bpp = 2;
-        break;
-    }*/
     PythonContext *s = inlink->dst->priv;
-
     int res = python_config_link(s->filter_instance, "config_input", inlink);
-
     return AVERROR(res);
 }
 
 static int config_output(AVFilterLink *outlink)
 {
-    /*
-    AVFilterLink *inlink = outlink->src->inputs[0];
-
-    outlink->w = inlink->w*4;
-    outlink->h = inlink->h*4;
-
-    av_log(inlink->dst, AV_LOG_VERBOSE, "fmt:%s size:%dx%d -> size:%dx%d\n",
-           av_get_pix_fmt_name(inlink->format),
-           inlink->w, inlink->h, outlink->w, outlink->h);
-
-    return 0;
-    */
     PythonContext *s = outlink->src->priv;
-
     int res = python_config_link(s->filter_instance, "config_output", outlink);
-
     return AVERROR(res);
 }
 
