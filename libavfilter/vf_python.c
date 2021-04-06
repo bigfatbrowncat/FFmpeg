@@ -117,41 +117,26 @@ static int open_lib(const char* libname, lib_handle_t* out) {
     }
 }
 
-static char* get_ffmpeg_exe(void) {
-#if defined(_WIN32) || defined(WINLIN)
-    char buf[MAX_PATH + 1];
-    memset(buf, 0, sizeof(buf));
-    if ((GetModuleFileNameA(NULL, buf, sizeof(buf) - 1) > 0) && GetLastError() == ERROR_SUCCESS) {
-        return strdup(buf);
-    }
-    return NULL;
-#elif defined(__linux__)
-    struct stat st;
-    char *buf;
-    if (lstat("/proc/self/exe", &st) != 0) {
-        return NULL;
-    }
-    buf = calloc(st.st_size + 1, sizeof(char));
-    if (buf == NULL) {
-        return NULL;
-    }
-    if (readlink("/proc/self/exe", buf, st.st_size) != st.st_size) {
-        free(buf);
-        return NULL;
-    }
-    return buf;
-#endif
-}
-
 typedef struct PyObject_ PyObject;
 typedef struct PyCompilerFlags_ PyCompilerFlags;
 typedef size_t Py_ssize_t;
 typedef struct PyThreadState_ PyThreadState;
 typedef void (*PyOS_sighandler_t)(int);
 
+typedef struct PythonContext {
+    const AVClass *class;
+
+    char* python_library;
+	char* script_filename;
+	char* class_name;
+	char* constructor_argument;
+
+	PyObject* user_module;
+    PyObject* filter_instance;
+} PythonContext;
+
 typedef struct py_embed {
     lib_handle_t hlib;
-    char* ffmpeg_exe;
 
     // Python C API loaded dynamically
     void (*Py_InitializeEx)(int initsigs);
@@ -217,6 +202,8 @@ typedef struct py_embed {
     PyObject** PyExc_AttributeError;
     PyOS_sighandler_t py_sigint, core_sigint;
     PyOS_sighandler_t py_sigterm, core_sigterm;
+
+    PythonContext* ctx;
 } py_embed_t;
 
 static py_embed_t s_py = { NULL };
@@ -225,7 +212,6 @@ static int fill_pyembed(lib_handle_t hpylib) {
     if (hpylib.handle == NULL) return 1;
     if (s_py.hlib.handle != NULL) return 2;
     memset(&s_py, 0, sizeof(s_py));
-    if ((s_py.ffmpeg_exe = get_ffmpeg_exe()) == NULL) return 3;
     s_py.hlib = hpylib;
 
 #define GET_SYMBOL(name)                        \
@@ -294,8 +280,9 @@ static int fill_pyembed(lib_handle_t hpylib) {
     return 0;
 }
 
-#define ACQUIRE_PYGIL() {                       \
+#define ACQUIRE_PYGIL(_ctx) {                   \
     s_py.PyEval_RestoreThread(s_py.tstate);     \
+    s_py.ctx = (_ctx);                          \
     s_py.PyOS_setsig(SIGINT, s_py.py_sigint);   \
     s_py.PyOS_setsig(SIGTERM, s_py.py_sigterm); \
 }
@@ -306,6 +293,7 @@ static int fill_pyembed(lib_handle_t hpylib) {
     s_py.PyOS_setsig(SIGINT, s_py.core_sigint);     \
     s_py.PyOS_setsig(SIGTERM, s_py.core_sigterm);   \
                                                     \
+    s_py.ctx = NULL;                                \
     s_py.tstate = s_py.PyEval_SaveThread();         \
 }
 
@@ -480,12 +468,12 @@ static int init_embed_python(const char* pylib) {
     return 0;
 }
 
-static int update_sys_path(const char* script_file) {
-    ACQUIRE_PYGIL();
+static int update_sys_path(PythonContext* ctx) {
+    ACQUIRE_PYGIL(ctx);
     {
         // append path to the script
         wchar_t* sys_path = s_py.Py_GetPath();
-        wchar_t* uscript_file = s_py.Py_DecodeLocale(script_file, NULL);
+        wchar_t* uscript_file = s_py.Py_DecodeLocale(ctx->script_filename, NULL);
         wchar_t *script_dir, *new_path;
 #if defined(_WIN32) || defined(__CYGWIN__)
         const wchar_t* path_sep = L";";
@@ -637,21 +625,10 @@ error:
     return 1;
 }
 
-typedef struct PythonContext {
-    const AVClass *class;
-
-    char* python_library;
-	char* script_filename;
-	char* class_name;
-	char* constructor_argument;
-
-	PyObject* user_module;
-    PyObject* filter_instance;
-} PythonContext;
 
 static int init_pycontext(PythonContext* ctx) {
     int res;
-    ACQUIRE_PYGIL();
+    ACQUIRE_PYGIL(ctx);
 
     res = get_user_module(ctx->script_filename, &(ctx->user_module));
     fprintf(stderr, "get_user_module returns %d\n", res);
@@ -674,7 +651,7 @@ static int init_pycontext(PythonContext* ctx) {
 }
 
 static int uninit_pycontext(PythonContext* ctx) {
-    ACQUIRE_PYGIL();
+    ACQUIRE_PYGIL(ctx);
 
     s_py.Py_DecRef(ctx->filter_instance);
     s_py.Py_DecRef(ctx->user_module);
@@ -683,13 +660,13 @@ static int uninit_pycontext(PythonContext* ctx) {
     return 0;
 }
 
-static int get_supported_formats(PyObject* filter_instance, enum AVPixelFormat** pix_fmts) {
+static int get_supported_formats(PythonContext* ctx, enum AVPixelFormat** pix_fmts) {
     PyObject *method = NULL, *args = NULL, *res = NULL, *elem = NULL;
     enum AVPixelFormat* fmt = NULL;
     int result = 0;
-    ACQUIRE_PYGIL();
+    ACQUIRE_PYGIL(ctx);
 
-    if ((method = s_py.PyObject_GetAttrString(filter_instance, "get_formats")) == NULL) {
+    if ((method = s_py.PyObject_GetAttrString(ctx->filter_instance, "get_formats")) == NULL) {
         PyObject* exc = s_py.PyErr_Occurred();
         if (exc == NULL || !s_py.PyErr_GivenExceptionMatches(exc, *s_py.PyExc_AttributeError)) goto error;
 
@@ -744,33 +721,29 @@ error:
 // Interface from python wrapper to the filter
 
 
-static int init_python_library_and_script(const char* dllfile, const char* pyfile) {
+static int init_python_library_and_script(PythonContext* ctx) {
     int res;
 
     if (s_py.hlib.handle == NULL) {
         // library wasn't already initialized
         lib_handle_t hlib;
-        if (open_lib(dllfile, &hlib) != 0) {
+        if (open_lib(ctx->python_library, &hlib) != 0) {
             return 1;
         }
 
         if (fill_pyembed(hlib) != 0) {
             return 2;
         }
-        if (init_embed_python(dllfile) != 0) {
+        if (init_embed_python(ctx->python_library) != 0) {
             return 3;
         }
-
-        if (update_sys_path(s_py.ffmpeg_exe) != 0) {
-            return 4;
-        }
     } else {
-        if (strcmp(dllfile, s_py.hlib.libpath) != 0) {
-            fprintf(stderr, "Python library '%s' already loaded, refusing to load '%s'", s_py.hlib.libpath, dllfile);
+        if (strcmp(ctx->python_library, s_py.hlib.libpath) != 0) {
+            fprintf(stderr, "Python library '%s' already loaded, refusing to load other: '%s'", s_py.hlib.libpath, ctx->python_library);
             fflush(stderr);
         }
     }
-    res = update_sys_path(pyfile);
+    res = update_sys_path(ctx);
     if (res != 0) {
         fprintf(stderr, "sys.path update fail: %d\n", res);
         fflush(stderr);
@@ -782,7 +755,7 @@ static int init_python_library_and_script(const char* dllfile, const char* pyfil
 
 static int uninit_python_library_and_script(void) {
     if (s_py.tstate != NULL) {
-        ACQUIRE_PYGIL();
+        ACQUIRE_PYGIL(NULL);
     }
     s_py.Py_FinalizeEx();
     // TODO Check returning value
@@ -790,7 +763,6 @@ static int uninit_python_library_and_script(void) {
     s_py.PyMem_RawFree(s_py.program_name);
     s_py.PyMem_RawFree(s_py.python_home);
     s_py.hlib.close(&s_py.hlib);
-    free(s_py.ffmpeg_exe);
     // TODO Check error??
 
     return 0;
@@ -808,10 +780,10 @@ static inline ubool _pack_int(const int value, const int pos, PyObject* tup) {
     return 1;
 }
 
-static int python_call_filter(PyObject* filter_instance, AVFrame* in, AVFrame* out) {
+static int python_call_filter(PythonContext* ctx, AVFrame* in, AVFrame* out) {
     PyObject *args = NULL, *tmpview = NULL, *result = NULL;
     int retval = 0;
-    ACQUIRE_PYGIL();
+    ACQUIRE_PYGIL(ctx);
 
     if ((args = s_py.PyTuple_New(2)) == NULL) goto error;
     if ((tmpview = s_py.PyMemoryView_FromMemory((char*)in, sizeof(AVFrame), PyBUF_WRITE)) == NULL) goto error;
@@ -820,7 +792,7 @@ static int python_call_filter(PyObject* filter_instance, AVFrame* in, AVFrame* o
     if (s_py.PyTuple_SetItem(args, 1, tmpview) != 0) goto error;
     tmpview = NULL; // owned by args
 
-    if ((result = s_py.PyObject_CallObject(filter_instance, args)) == NULL) goto error;
+    if ((result = s_py.PyObject_CallObject(ctx->filter_instance, args)) == NULL) goto error;
 
 finish:
     s_py.Py_DecRef(args);
@@ -843,12 +815,12 @@ error:
     goto finish;
 }
 
-static int python_config_link(PyObject* filter_instance, const char* method_name, AVFilterLink* link) {
+static int python_config_link(PythonContext* ctx, const char* method_name, AVFilterLink* link) {
     PyObject *method = NULL, *args = NULL, *tmpview = NULL, *res = NULL;
     int result = 0;
-    ACQUIRE_PYGIL();
+    ACQUIRE_PYGIL(ctx);
 
-    if ((method = s_py.PyObject_GetAttrString(filter_instance, method_name)) == NULL) {
+    if ((method = s_py.PyObject_GetAttrString(ctx->filter_instance, method_name)) == NULL) {
         PyObject* exc = s_py.PyErr_Occurred();
         if (exc == NULL || !s_py.PyErr_GivenExceptionMatches(exc, *s_py.PyExc_AttributeError)) goto error;
         s_py.PyErr_Clear();
@@ -911,16 +883,8 @@ static int pythonCallProcess(AVFilterContext *ctx, void *arg, int jobnr, int nb_
     AVFrame *in = td->in;
     AVFrame *out = td->out;
 
-    //const int slice_start = (in->height * jobnr) / nb_jobs;
-    //const int slice_end = (in->height * (jobnr+1)) / nb_jobs;
-
-    // Currently only one thread is supported here, so jobnr has to be 0 and nb_jobs should be 1
     if (s->user_module) {
-        /*int pycall_res = python_call(s->user_module, s->class_name, 
-            in->format, in->width, in->height,
-            in->linesize, out->linesize, in->data, out->data);*/
-        //int pycall_res = python_call_av(s->user_module, s->class_name, in, out);
-        int pycall_res = python_call_filter(s->filter_instance, in, out);
+        int pycall_res = python_call_filter(s, in, out);
         switch (pycall_res) {
             case 0: break;
             case AVERROR_EXIT:
@@ -958,7 +922,7 @@ static int query_formats(AVFilterContext *ctx)
     enum AVPixelFormat* pix_fmts;
     AVFilterFormats *fmts_list;
 
-    if (get_supported_formats(s->filter_instance, &pix_fmts) != 0) {
+    if (get_supported_formats(s, &pix_fmts) != 0) {
         return AVERROR_EXTERNAL;
     }
     
@@ -973,14 +937,14 @@ static int query_formats(AVFilterContext *ctx)
 static int config_input(AVFilterLink *inlink)
 {
     PythonContext *s = inlink->dst->priv;
-    int res = python_config_link(s->filter_instance, "config_input", inlink);
+    int res = python_config_link(s, "config_input", inlink);
     return AVERROR(res);
 }
 
 static int config_output(AVFilterLink *outlink)
 {
     PythonContext *s = outlink->src->priv;
-    int res = python_config_link(s->filter_instance, "config_output", outlink);
+    int res = python_config_link(s, "config_output", outlink);
     return AVERROR(res);
 }
 
@@ -1035,7 +999,7 @@ static av_cold int init(AVFilterContext *ctx)
     fprintf(stderr, "class_name: %s\n", s->class_name); fflush(stderr);
     fprintf(stderr, "constructor_argument: %s\n", s->constructor_argument); fflush(stderr);
 
-    res = init_python_library_and_script(s->python_library, s->script_filename);
+    res = init_python_library_and_script(s);
     fprintf(stderr, "init_python_library_and_script returns %d\n", res);
     if (res != 0) {
         return AVERROR(EIO);
