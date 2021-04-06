@@ -123,6 +123,18 @@ class AVFrame(ctypes.Structure):
         return np_ctypes.as_array(self._data[idx], shape=shape)
 
 
+def staticmethod_helper(decorator):
+    def wrapped_decorator(func):
+        if isinstance(func, staticmethod):
+            func = func.__func__
+            is_static = True
+        else:
+            is_static = False
+        res = decorator(func)
+        return staticmethod(res) if is_static else res
+    return wrapped_decorator
+
+@staticmethod_helper
 def unpack_frames(func):
     def transform(x):
         return AVFrame.from_buffer(x) if isinstance(x, memoryview) else x
@@ -216,6 +228,7 @@ FORMAT_BY_NAME = {fmt.name: fmt for fmt in PIXEL_FORMATS}
 FORMAT_BY_ID = {int(fmt): fmt for fmt in PIXEL_FORMATS}
 
 
+@staticmethod_helper
 def convert_pixformat(func):
     def wrapper(*args, **kw):
         res = func(*args, **kw)
@@ -348,6 +361,7 @@ AVFilterContext._fields_ = [
 ]
 
 
+@staticmethod_helper
 def unpack_filterlink(func):
     def transform(x):
         return AVFilterLink.from_buffer(x) if isinstance(x, memoryview) else x
@@ -362,17 +376,19 @@ def unpack_filterlink(func):
 
 
 def wrap_filter(cls):
-    try:
-        cls.get_formats = convert_pixformat(cls.get_formats)
-    except AttributeError:
-        pass
-    try:
-        cls.config_input = unpack_filterlink(cls.config_input)
-    except AttributeError:
-        pass
-    try:
-        cls.config_output = unpack_filterlink(cls.config_output)
-    except AttributeError:
-        pass
+    def _wrap(name, conv):
+        try:
+            method, method_desc = getattr(cls, name), cls.__dict__[name]
+        except (AttributeError, KeyError):
+            return
+        method = conv(method)
+        if isinstance(method_desc, staticmethod):
+            method = staticmethod(method)
+        setattr(cls, name, method)
+
+    _wrap("get_formats", convert_pixformat)
+    _wrap("config_input", unpack_filterlink)
+    _wrap("config_output", unpack_filterlink)
+
     cls.__call__ = unpack_frames(cls.__call__)
     return cls

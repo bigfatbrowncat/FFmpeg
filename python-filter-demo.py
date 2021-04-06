@@ -11,9 +11,10 @@ class Foo:
         except ValueError:
             raise ValueError(f"Argument should be zoom factor, got {arg}")
 
-    def get_formats(
-        self,
-    ) -> typing.Sequence[typing.Union[str, ffmpeg_api.AVPixFmtDescriptor, int]]:
+    @staticmethod
+    def get_formats() -> typing.Sequence[
+        typing.Union[str, ffmpeg_api.AVPixFmtDescriptor, int]
+    ]:
         return ["rgb24"]
 
     def config_output(self, outlink: ffmpeg_api.AVFilterLink):
