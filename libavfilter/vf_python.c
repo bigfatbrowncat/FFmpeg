@@ -349,21 +349,22 @@ static int fill_pyembed(lib_handle_t hpylib) {
     return 0;
 }
 
-#define ACQUIRE_PYGIL(_ctx) {                   \
-    s_py.PyEval_RestoreThread(s_py.tstate);     \
-    s_py.ctx = (_ctx);                          \
-    s_py.PyOS_setsig(SIGINT, s_py.py_sigint);   \
-    s_py.PyOS_setsig(SIGTERM, s_py.py_sigterm); \
+static void acquire_pygil(PythonContext* ctx) {
+    s_py.PyEval_RestoreThread(s_py.tstate);
+    s_py.ctx = ctx;
+    s_py.PyOS_setsig(SIGINT, s_py.py_sigint);
+    s_py.PyOS_setsig(SIGTERM, s_py.py_sigterm);
 }
-#define RELEASE_PYGIL() {                           \
-    s_py.py_sigint = s_py.PyOS_getsig(SIGINT);      \
-    s_py.py_sigterm = s_py.PyOS_getsig(SIGTERM);    \
-                                                    \
-    s_py.PyOS_setsig(SIGINT, s_py.core_sigint);     \
-    s_py.PyOS_setsig(SIGTERM, s_py.core_sigterm);   \
-                                                    \
-    s_py.ctx = NULL;                                \
-    s_py.tstate = s_py.PyEval_SaveThread();         \
+
+static void release_pygil(void) {
+    s_py.py_sigint = s_py.PyOS_getsig(SIGINT);
+    s_py.py_sigterm = s_py.PyOS_getsig(SIGTERM);
+
+    s_py.PyOS_setsig(SIGINT, s_py.core_sigint);
+    s_py.PyOS_setsig(SIGTERM, s_py.core_sigterm);
+
+    s_py.ctx = NULL;
+    s_py.tstate = s_py.PyEval_SaveThread();
 }
 
 // stolen from Python/Include/object.h
@@ -503,14 +504,14 @@ static int init_embed_python(const char* pylib) {
         long file_input;
         if (modSymbol == NULL) {
             s_py.PyErr_Print();
-            RELEASE_PYGIL();
+            release_pygil();
             return 1001;
         }
         pyFileInput = s_py.PyObject_GetAttrString(modSymbol, "file_input");
         s_py.Py_DecRef(modSymbol);
         if (pyFileInput == NULL) {
             s_py.PyErr_Print();
-            RELEASE_PYGIL();
+            release_pygil();
             return 1002;
         }
         file_input = s_py.PyLong_AsLong(pyFileInput);
@@ -519,7 +520,7 @@ static int init_embed_python(const char* pylib) {
             if (s_py.PyErr_Occurred()) {
                 s_py.PyErr_Print();
             }
-            RELEASE_PYGIL();
+            release_pygil();
             return 1003;
         }
         s_py.file_input = file_input;
@@ -531,13 +532,13 @@ static int init_embed_python(const char* pylib) {
             if (s_py.PyDict_SetItemString(sys_modules, "_ffmpeg", _ffmpeg_mod) != 0) {
                 s_py.Py_DecRef(_ffmpeg_mod);
                 s_py.Py_DecRef(sys_modules);
-                RELEASE_PYGIL();
+                release_pygil();
                 return 1004;
             }
         } else {
             s_py.Py_DecRef(_ffmpeg_mod);
             s_py.Py_DecRef(sys_modules);
-            RELEASE_PYGIL();
+            release_pygil();
             return 1004;
         }
         s_py.Py_DecRef(_ffmpeg_mod);
@@ -545,13 +546,13 @@ static int init_embed_python(const char* pylib) {
     }
 
     // release the GIL, per Python control flow
-    RELEASE_PYGIL();
+    release_pygil();
 
     return 0;
 }
 
 static int update_sys_path(PythonContext* ctx) {
-    ACQUIRE_PYGIL(ctx);
+    acquire_pygil(ctx);
     {
         // append path to the script
         wchar_t* sys_path = s_py.Py_GetPath();
@@ -563,19 +564,19 @@ static int update_sys_path(PythonContext* ctx) {
         const wchar_t* path_sep = L":";
 #endif
         if (uscript_file == NULL) {
-            RELEASE_PYGIL();
+            release_pygil();
             return 1;
         }
         script_dir = get_dir_name(uscript_file);
         s_py.PyMem_RawFree(uscript_file);
         if (script_dir == NULL) {
-            RELEASE_PYGIL();
+            release_pygil();
             return 2;
         }
         new_path = s_py.PyMem_RawCalloc(wcslen(sys_path) + wcslen(path_sep) + wcslen(script_dir) + 1, sizeof(wchar_t));
         if (new_path == NULL) {
             s_py.PyMem_RawFree(script_dir);
-            RELEASE_PYGIL();
+            release_pygil();
             return 3;
         }
         wcscat(wcscat(wcscpy(new_path, sys_path), path_sep), script_dir);
@@ -591,21 +592,21 @@ static int update_sys_path(PythonContext* ctx) {
         PyObject *siteMain, *noArgs, *siteMainRes;
         if (siteModule == NULL) {
             s_py.PyErr_Print();
-            RELEASE_PYGIL();
+            release_pygil();
             return 1001;
         }
         siteMain = s_py.PyObject_GetAttrString(siteModule, "main");
         s_py.Py_DecRef(siteModule);
         if (siteMain == NULL) {
             s_py.PyErr_Print();
-            RELEASE_PYGIL();
+            release_pygil();
             return 1002;
         }
         noArgs = s_py.PyTuple_New(0);
         if (noArgs == NULL) {
             s_py.Py_DecRef(siteMain);
             s_py.PyErr_Print();
-            RELEASE_PYGIL();
+            release_pygil();
             return 1003;
         }
         siteMainRes = s_py.PyObject_CallObject(siteMain, noArgs);
@@ -613,13 +614,13 @@ static int update_sys_path(PythonContext* ctx) {
         s_py.Py_DecRef(noArgs);
         if (siteMainRes == NULL) {
             s_py.PyErr_Print();
-            RELEASE_PYGIL();
+            release_pygil();
             return 1004;
         }
         s_py.Py_DecRef(siteMainRes);
     }
 
-    RELEASE_PYGIL();
+    release_pygil();
     return 0;
 }
 
@@ -710,7 +711,7 @@ error:
 
 static int init_pycontext(PythonContext* ctx) {
     int res;
-    ACQUIRE_PYGIL(ctx);
+    acquire_pygil(ctx);
 
     res = get_user_module(ctx->script_filename, &(ctx->user_module));
     fprintf(stderr, "get_user_module returns %d\n", res);
@@ -718,27 +719,27 @@ static int init_pycontext(PythonContext* ctx) {
         if (s_py.PyErr_Occurred()) {
             s_py.PyErr_Print();
         }
-        RELEASE_PYGIL();
+        release_pygil();
         return 2;
     }
 
     res = init_pyfilter_class(ctx->user_module, ctx->class_name, ctx->constructor_argument, &(ctx->filter_instance));
     if (res != 0) {
-        RELEASE_PYGIL();
+        release_pygil();
         return 3;
     }
 
-    RELEASE_PYGIL();
+    release_pygil();
     return 0;
 }
 
 static int uninit_pycontext(PythonContext* ctx) {
-    ACQUIRE_PYGIL(ctx);
+    acquire_pygil(ctx);
 
     s_py.Py_DecRef(ctx->filter_instance);
     s_py.Py_DecRef(ctx->user_module);
 
-    RELEASE_PYGIL();
+    release_pygil();
     return 0;
 }
 
@@ -746,7 +747,7 @@ static int get_supported_formats(PythonContext* ctx, enum AVPixelFormat** pix_fm
     PyObject *method = NULL, *args = NULL, *res = NULL, *elem = NULL;
     enum AVPixelFormat* fmt = NULL;
     int result = 0;
-    ACQUIRE_PYGIL(ctx);
+    acquire_pygil(ctx);
 
     if ((method = s_py.PyObject_GetAttrString(ctx->filter_instance, "get_formats")) == NULL) {
         PyObject* exc = s_py.PyErr_Occurred();
@@ -789,7 +790,7 @@ finish:
     s_py.Py_DecRef(res);
     s_py.Py_DecRef(args);
     s_py.Py_DecRef(method);
-    RELEASE_PYGIL();
+    release_pygil();
     return result;
 error:
     if (s_py.PyErr_Occurred()) {
@@ -837,7 +838,7 @@ static int init_python_library_and_script(PythonContext* ctx) {
 
 static int uninit_python_library_and_script(void) {
     if (s_py.tstate != NULL) {
-        ACQUIRE_PYGIL(NULL);
+        acquire_pygil(NULL);
     }
     s_py.Py_FinalizeEx();
     // TODO Check returning value
@@ -865,7 +866,7 @@ static inline ubool _pack_int(const int value, const int pos, PyObject* tup) {
 static int python_call_filter(PythonContext* ctx, AVFrame* in, AVFrame* out) {
     PyObject *args = NULL, *tmpview = NULL, *result = NULL;
     int retval = 0;
-    ACQUIRE_PYGIL(ctx);
+    acquire_pygil(ctx);
 
     if ((args = s_py.PyTuple_New(2)) == NULL) goto error;
     if ((tmpview = s_py.PyMemoryView_FromMemory((char*)in, sizeof(AVFrame), PyBUF_WRITE)) == NULL) goto error;
@@ -880,7 +881,7 @@ finish:
     s_py.Py_DecRef(args);
     s_py.Py_DecRef(tmpview);
     s_py.Py_DecRef(result);
-    RELEASE_PYGIL();
+    release_pygil();
     return retval;
 error:
     {
@@ -900,7 +901,7 @@ error:
 static int python_config_link(PythonContext* ctx, const char* method_name, AVFilterLink* link) {
     PyObject *method = NULL, *args = NULL, *tmpview = NULL, *res = NULL;
     int result = 0;
-    ACQUIRE_PYGIL(ctx);
+    acquire_pygil(ctx);
 
     if ((method = s_py.PyObject_GetAttrString(ctx->filter_instance, method_name)) == NULL) {
         PyObject* exc = s_py.PyErr_Occurred();
@@ -920,7 +921,7 @@ finish:
     s_py.Py_DecRef(args);
     s_py.Py_DecRef(tmpview);
     s_py.Py_DecRef(res);
-    RELEASE_PYGIL();
+    release_pygil();
     return result;
 error:
     if (s_py.PyErr_Occurred()) {
